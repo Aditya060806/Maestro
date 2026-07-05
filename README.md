@@ -23,33 +23,81 @@ Then open [OpenCode](https://opencode.ai/) and type `/onboarding`. New here? Sta
 
 Founded by [Aditya Pandey and Harvest](https://github.com/Aditya060806) to help anyone level up their AI & open-source game.
 
-## **The Aim**
+## The aim
 
-**Maximum value for your time and money.** **[maestro](https://maestro.sh)** is built for the gap between “the model can probably do this” and “the work is actually done, verified, safe, and worth the cost.”
+**Maximum value for your time and money.** Maestro lives in the gap between "the model can probably do this" and "the work is actually done — verified, safe, and worth the cost." It loads the right context only when needed, spends model budget deliberately, keeps secrets out of chat, and leaves a traceable git trail — so useful work ships with less supervision.
 
-- Load the right context when it is needed, instead of stuffing every agent, skill, and tool into the prompt.
-- Spend tokens and model budget deliberately. Cheap and fast models should handle routine work; stronger models should handle judgement, architecture, review, and risk.
-- Keep secrets out of chat. Credentials, tenants, scans, confirmations, and audit logs are part of the workflow, not an afterthought.
-- Let people and agents work across machines without trampling each other. Worktrees, branches, PRs, task IDs, mailbox state, and memory keep the work separated and traceable.
-- Notice when the system is struggling. Stuck workers, orphaned PRs, stale assignments, CI failures, review-bot traps, and repeated mistakes should become visible signals.
-- Improve the framework from real use. Imported skills, session learnings, quality findings, and better patterns should become better agents, hooks, scripts, and docs.
-- Optimise for profitable outcomes: useful work shipped, lower supervision cost, safer operations, and decisions that make sense beyond the next prompt.
+## How it works
 
-The result: an AI operations platform that manages projects across every business domain — absorbing everything automatable so you can focus on what matters.
+One goal in, shipped work out. Maestro runs a continuous loop: plan, dispatch, verify, ship, and learn.
 
-**Built on proven patterns**: maestro implements [industry-standard agent design patterns](#agent-design-patterns) - including multi-layer action spaces, context isolation, and iterative execution loops.
+```mermaid
+flowchart LR
+  G["Your goal"] --> P["Plan: milestones + tasks"]
+  P --> D["Dispatch: parallel workers"]
+  D --> V{"Verify: tests, lint, CI, review"}
+  V -- pass --> S["Ship: branch, PR, merge"]
+  V -- fail --> D
+  S --> M[("Memory: lessons learned")]
+  M --> P
+```
 
-## **Why This Framework?**
+Work flows through layers that keep each agent focused and each action auditable.
 
-**Beyond single-task AI.** A normal AI harness can be brilliant for one job and still weak at the work around the job. maestro is for the surrounding discipline: context, routing, safety, git hygiene, collaboration, verification, memory, and follow-through.
+```mermaid
+flowchart TD
+  U["You: one conversation"] --> B["Build+ primary agent: plan vs execute"]
+  B --> DA["Domain specialists: code, SEO, content, business, legal, more"]
+  DA --> T["Tools, services, 1,800+ helper scripts"]
+  T --> R[("Git: worktrees, PRs, CI")]
+  T --> SEC["Secrets vault + audit log"]
+  R --> PULSE["Pulse supervisor: dispatch, merge, unstick"]
+  PULSE --> B
+```
 
-**What makes it different:**
+## Why Maestro
 
-- **Pulse supervision** - scheduled checks can dispatch workers, merge ready PRs, close loops, and surface stuck work.
-- **Domain agents** - code, automation, product, business, marketing, legal, content, research, SEO, health, reports, and framework work each get their own guidance.
-- **Cross-model checks** - risky operations can be reviewed by a second provider to reduce shared failure modes.
-- **Service coverage** - hosting, Git platforms, DNS, security, monitoring, deployment, payments, communications, and more are handled through repeatable helpers.
-- **Mission work** - larger goals can be split into milestones with validation, budget tracking, and automatic advancement.
+Most AI tools are great at a single task and weak at the work around it. Maestro is built for that surrounding discipline — context, routing, safety, git hygiene, verification, memory, and follow-through.
+
+| Capability | Plain AI chat | Single-agent CLI | Maestro |
+|---|---|---|---|
+| Context loading | Manual copy-paste | Whole repo in prompt | On-demand, progressive |
+| Model spend | One model for everything | One model for everything | Tiered: cheap routine, strong judgement |
+| Parallel work | No | Rare | Worktrees + parallel workers |
+| Secrets handling | Pasted into chat | Ad hoc | Encrypted vault, never in chat |
+| Git hygiene | Manual | Manual | Auto worktrees, PRs, task IDs |
+| Verification | You check | Sometimes | Tests / lint / CI gates before "done" |
+| Memory across sessions | None | Limited | SQLite memory, recalled on demand |
+| Supervision | You watch | You watch | Pulse loop dispatches and unsticks work |
+
+## Efficiency by design
+
+Maestro is built to ship more useful work per dollar and per token. Two levers do most of the work: **progressive disclosure** (load only the guidance a task needs) and **model tiering** (route routine work to fast, cheap models; reserve strong models for judgement, architecture, and review).
+
+```mermaid
+pie showData
+  title Model budget by tier (typical mission)
+  "Fast / cheap: triage and routine" : 70
+  "Strong: architecture, review, risk" : 30
+```
+
+| Technique | What it saves |
+|---|---|
+| Progressive disclosure | Loads pointers, not full playbooks — smaller prompts |
+| Per-agent tool filtering | ~12–20 tools per agent instead of hundreds |
+| Model tiering | Cheap models handle the bulk; strong models handle the hard 30% |
+| Context offload | Working files live on disk, not in the prompt |
+| Memory recall | Reuses past lessons instead of re-deriving them |
+| Token-efficient CLI (RTK) | Compact git / gh / test summaries before they reach context |
+
+## What makes it different
+
+- **Pulse supervision** — scheduled checks dispatch workers, merge ready PRs, close loops, and surface stuck work.
+- **Domain agents** — code, automation, product, business, marketing, legal, content, research, SEO, health, and reports each get their own guidance.
+- **Cross-model checks** — risky operations can be reviewed by a second provider to reduce shared failure modes.
+- **Service coverage** — hosting, Git platforms, DNS, security, monitoring, deployment, payments, and communications through repeatable helpers.
+- **Mission work** — large goals split into milestones with validation, budget tracking, and automatic advancement.
+- **Built on proven patterns** — [industry-standard agent design patterns](#agent-design-patterns): multi-layer action spaces, context isolation, and iterative execution loops.
 
 ---
 
