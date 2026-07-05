@@ -1,6 +1,6 @@
 {
   "name": "@aditya060806/maestro",
-  "version": "3.31.53",
+  "version": "1.0.0",
   "description": "Maestro Framework - AI-assisted development workflows, code quality, and deployment automation",
   "type": "module",
   "publishConfig": {
