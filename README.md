@@ -3,19 +3,25 @@
 
 ![Maestro social graph preview](docs/assets/og-image.png)
 
-# Maestro Framework
+# Maestro
 
-**[maestro.sh](https://maestro.sh)** is an [OpenCode](https://opencode.ai/) plugin and Maestro framework for people who want AI to do useful work across code, infrastructure, business, marketing, content, and creative projects without turning every job into another long, fragile chat.
+**AI that does the whole job — plans, codes, reviews, ships, and remembers.**
 
-Most AI tools still leave you doing the hard coordination yourself: finding the right context, choosing a model, protecting secrets, managing branches, watching CI, spotting stuck work, and remembering what went wrong last time. maestro puts structure around that work so agents can share context, work safely in parallel, spend model budget where it matters, and leave the system better than they found it.
+Maestro is an [OpenCode](https://opencode.ai/) plugin and autonomous AI DevOps framework. Give it a goal in one conversation and it breaks the work into milestones, dispatches workers in parallel, protects your secrets, manages branches and PRs, watches CI, and learns from what went wrong last time — across code, infrastructure, business, marketing, and content.
 
-> **Recommended setup:** [OpenCode](https://opencode.ai/) + OpenAI models. GPT-5.5 is the preferred high-capability model for complex agent work; GPT-5.4 mini is the preferred fast, lower-cost model for triage and routine implementation. Claude models (Anthropic) remain fully supported, and other model providers are evaluated from time to time as their quality, latency, and cost profiles change.
+![Maestro planning a task, dispatching a worker, and opening a pull request](docs/assets/demo-terminal.svg)
 
-*"Scope a mission to redesign the landing pages — break it into milestones, dispatch workers in parallel, validate each milestone, and track budget across the whole project."*
+```bash
+npm install -g maestro && maestro update
+```
 
-**One conversation, autonomous project delivery, with security, teamwork, token efficiency, and quality control built in.**
+Then open [OpenCode](https://opencode.ai/) and type `/onboarding`. New here? Start with the **[2-minute Quickstart »](QUICKSTART.md)**
 
-Founded by [Aditya Pandey and Harvest](https://github.com/Aditya060806) on 9th November 2025 to help anyone level-up their AI & Open-Source game.
+> Recommended: OpenCode + OpenAI **GPT‑5.5** (deep work) and **GPT‑5.4 mini** (fast/routine). Claude, Gemini, and Cursor are also supported.
+
+**One conversation → autonomous project delivery**, with security, teamwork, token efficiency, and quality control built in.
+
+Founded by [Aditya Pandey and Harvest](https://github.com/Aditya060806) to help anyone level up their AI & open-source game.
 
 ## **The Aim**
 
@@ -85,6 +91,14 @@ the copyright and license notices are retained. If you build a derivative
 framework, automation bot, workflow library, or commercial product from maestro
 code or distinctive operating patterns, see [ATTRIBUTION.md](ATTRIBUTION.md) for
 the required notices and preferred credit text.
+
+## Community & support
+
+- **[2-minute Quickstart](QUICKSTART.md)** — install, connect one model, run your first task.
+- **[Discussions](https://github.com/Aditya060806/Maestro/discussions)** — ask questions and share what you built.
+- **[Issues](https://github.com/Aditya060806/Maestro/issues)** — report bugs and request features.
+- **[Contributing](CONTRIBUTING.md)** — how to propose changes and extend the framework.
+- **[Security policy](SECURITY.md)** — how to report vulnerabilities responsibly.
 
 <!-- AI-CONTEXT-START -->
 

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 404" width="760" height="404" font-family="ui-monospace, 'DejaVu Sans Mono', Menlo, Consolas, monospace" role="img" aria-label="Maestro planning a task, dispatching a worker, and opening a pull request">
+  <defs>
+    <style>
+      .l { opacity: 1; }
+      .fade { animation: reveal 0.35s ease-out both; }
+      @keyframes reveal { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
+      .l0{animation-delay:.1s}.l1{animation-delay:.5s}.l2{animation-delay:.8s}.l3{animation-delay:1.0s}
+      .l4{animation-delay:1.2s}.l5{animation-delay:1.6s}.l6{animation-delay:1.8s}.l7{animation-delay:2.0s}
+      .l8{animation-delay:2.2s}.l9{animation-delay:2.6s}.l10{animation-delay:2.8s}.l11{animation-delay:3.0s}
+      .l12{animation-delay:3.4s}
+    </style>
+  </defs>
+
+  <rect x="6" y="6" width="748" height="392" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="1.5"/>
+  <rect x="6" y="6" width="748" height="38" rx="12" fill="#161b22"/>
+  <rect x="6" y="30" width="748" height="14" fill="#161b22"/>
+  <circle cx="30" cy="25" r="6" fill="#ff5f56"/>
+  <circle cx="52" cy="25" r="6" fill="#ffbd2e"/>
+  <circle cx="74" cy="25" r="6" fill="#27c93f"/>
+  <text x="380" y="29" text-anchor="middle" fill="#8b949e" font-size="12.5">maestro — one conversation, shipped</text>
+
+  <g font-size="14.5">
+    <text class="l fade l0" x="24" y="76" fill="#e6edf3"><tspan fill="#3fb950">$ </tspan>maestro <tspan fill="#a5d6ff">"fix the login redirect bug and open a PR"</tspan></text>
+
+    <text class="l fade l1" x="24" y="106" fill="#58a6ff">▸ Planning ────────────────────────────────────</text>
+    <text class="l fade l2" x="40" y="128" fill="#8b949e"><tspan fill="#3fb950">✓ </tspan>Read auth/session.ts, routes/login.ts</text>
+    <text class="l fade l3" x="40" y="150" fill="#8b949e"><tspan fill="#3fb950">✓ </tspan>Root cause: redirect drops the <tspan fill="#e6edf3">?next</tspan> param</text>
+    <text class="l fade l4" x="40" y="172" fill="#8b949e"><tspan fill="#3fb950">✓ </tspan>Plan: patch handler + add regression test</text>
+
+    <text class="l fade l5" x="24" y="202" fill="#58a6ff">▸ Dispatching worker <tspan fill="#8b949e">(gpt-5.4 mini)</tspan> ──────────────</text>
+    <text class="l fade l6" x="40" y="224" fill="#8b949e"><tspan fill="#3fb950">✓ </tspan>Branch  <tspan fill="#e6edf3">fix/login-redirect</tspan></text>
+    <text class="l fade l7" x="40" y="246" fill="#8b949e"><tspan fill="#3fb950">✓ </tspan>Edited  routes/login.ts  <tspan fill="#3fb950">+12</tspan> <tspan fill="#f85149">−3</tspan></text>
+    <text class="l fade l8" x="40" y="268" fill="#8b949e"><tspan fill="#3fb950">✓ </tspan>Tests   <tspan fill="#e6edf3">6 passed</tspan></text>
+
+    <text class="l fade l9" x="24" y="298" fill="#58a6ff">▸ Shipping ─────────────────────────────────────</text>
+    <text class="l fade l10" x="40" y="320" fill="#8b949e"><tspan fill="#3fb950">✓ </tspan>Opened <tspan fill="#bc8cff">PR #128</tspan>  "Fix login redirect (?next)"</text>
+    <text class="l fade l11" x="40" y="342" fill="#8b949e"><tspan fill="#3fb950">✓ </tspan>CI green · review-bot: no blocking issues</text>
+
+    <text class="l fade l12" x="24" y="374" fill="#e6edf3">Done in 47s · <tspan fill="#bc8cff">$0.02</tspan> · memory updated <tspan fill="#3fb950">✓</tspan></text>
+  </g>
+</svg>
