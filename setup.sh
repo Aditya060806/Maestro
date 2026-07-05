@@ -12,7 +12,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 # AI Assistant Server Access Framework Setup Script
 # Helps developers set up the framework for their infrastructure
 #
-# Version: 1.0.0
+# Version: 1.0.1
 #
 # Quick Install:
 #   npm install -g maestro && maestro update          (recommended)

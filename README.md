@@ -114,7 +114,7 @@ pie showData
 [![Copyright](https://img.shields.io/badge/Copyright-Aditya%20Pandey%20and%20Harvest%202025--2026-blue.svg)](https://github.com/Aditya060806)
 
 <!-- Release & Version Info -->
-[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg)](https://github.com/Aditya060806/Maestro/releases)
+[![Version](https://img.shields.io/badge/Version-1.0.1-blue.svg)](https://github.com/Aditya060806/Maestro/releases)
 [![npm version](https://img.shields.io/npm/v/@aditya060806/maestro)](https://www.npmjs.com/package/@aditya060806/maestro)
 [![Homebrew](https://img.shields.io/badge/homebrew-Aditya060806%2Ftap-orange)](https://github.com/Aditya060806/homebrew-tap)
 [![GitHub repository](https://img.shields.io/badge/github-repository-181717.svg?logo=github)](https://github.com/Aditya060806/Maestro)

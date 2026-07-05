@@ -5,7 +5,7 @@
 # Maestro Framework CLI
 # Usage: maestro <command> [options]
 #
-# Version: 1.0.0
+# Version: 1.0.1
 
 set -euo pipefail
 

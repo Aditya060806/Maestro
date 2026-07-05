@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-07-05
+
+### Changed
+
+- Rewrote the README with a how-it-works flow, a capability comparison table, and an efficiency chart.
+- Added a 2-minute Quickstart and a tested dashboard headline surfaced in the GUI overview.
+- Allowed Windows installs (`os` includes `win32`).
+
 ## [1.0.0] - 2026-07-05
 
 ### Changed
