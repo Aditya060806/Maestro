@@ -1,0 +1,41 @@
+---
+description: Route artifact-first design requests across maestro and optional Open Design
+agent: Build+
+mode: subagent
+---
+
+<!-- SPDX-License-Identifier: MIT -->
+<!-- SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest -->
+
+# Design Artifact Routing
+
+Request: $ARGUMENTS
+
+## Decision Tree
+
+1. If the project lacks `DESIGN.md`, create/lint it first via `tools/design/design-md.md`.
+2. For brand guideline handoff, run `maestro design guidelines . --pdf` and review `_reports/brand-guidelines/`.
+3. For cross-repo rollout, run `maestro design survey --json` then `maestro design issues --apply` to file worker-ready GUI repo tasks.
+4. If the task is implementation in an existing codebase, use maestro UI agents directly.
+5. If the task is artifact-first preview/export (deck, poster, carousel, mobile mock, email, one-off HTML), consider `/open-design route "$ARGUMENTS"`.
+6. If Open Design is used, keep generated files in its `.od/` workspace until selected outputs are reviewed.
+7. Run verification: `workflows/ui-verification.md`, `email-design-test-helper.sh`, or media/deck export checks.
+
+## Recommended Outputs
+
+| Artifact | Primary route | Verification |
+|----------|---------------|--------------|
+| Landing page prototype | maestro or Open Design `web-prototype` | Playwright screenshots + contrast |
+| SaaS/pricing page | Open Design candidate, then maestro implementation | CRO review + UI verification |
+| HTML deck/PPT | Open Design deck skill | PDF/PPTX export + fidelity audit |
+| Email creative | Open Design candidate + maestro email workflow | local render + Email on Acid when needed |
+| Mobile app mock | Open Design mobile skill | mobile/tablet screenshots + accessibility |
+| Social carousel/poster | Open Design candidate | dimensions, brand, export QA |
+| Production UI code | maestro native | tests, lint, browser verification |
+
+## Related
+
+- `tools/design/open-design.md`
+- `tools/design/design-md.md`
+- `product/ui-design.md`
+- `workflows/ui-verification.md`

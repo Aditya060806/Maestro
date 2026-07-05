@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
+REPO_ROOT="${SCRIPT_DIR}/../../.."
+SETUP_SH="${REPO_ROOT}/setup.sh"
+MAESTRO_SH="${REPO_ROOT}/maestro.sh"
+PACKAGE_JSON="${REPO_ROOT}/package.json"
+GUI_WEB_PACKAGE_JSON="${REPO_ROOT}/packages/gui-web/package.json"
+
+TESTS_RUN=0
+TESTS_FAILED=0
+
+print_result() {
+	local test_name="$1"
+	local passed="$2"
+	local message="${3:-}"
+	TESTS_RUN=$((TESTS_RUN + 1))
+	if [[ "$passed" -eq 0 ]]; then
+		printf 'PASS %s\n' "$test_name"
+		return 0
+	fi
+	printf 'FAIL %s\n' "$test_name"
+	if [[ -n "$message" ]]; then
+		printf '     %s\n' "$message"
+	fi
+	TESTS_FAILED=$((TESTS_FAILED + 1))
+	return 0
+}
+
+assert_contains() {
+	local test_name="$1"
+	local haystack="$2"
+	local needle="$3"
+	if [[ "$haystack" == *"$needle"* ]]; then
+		print_result "$test_name" 0
+		return 0
+	fi
+	print_result "$test_name" 1 "missing: $needle"
+	return 0
+}
+
+assert_occurrence_count() {
+	local test_name="$1"
+	local haystack="$2"
+	local needle="$3"
+	local expected_count="$4"
+	python3 - "$test_name" "$haystack" "$needle" "$expected_count" <<'PY'
+import sys
+
+test_name, haystack, needle, expected_count = sys.argv[1:]
+actual_count = haystack.count(needle)
+if actual_count == int(expected_count):
+    sys.exit(0)
+print(f"{test_name}: expected {expected_count} occurrence(s), got {actual_count}")
+sys.exit(1)
+PY
+	local rc=$?
+	if [[ "$rc" -eq 0 ]]; then
+		print_result "$test_name" 0
+		return 0
+	fi
+	print_result "$test_name" 1 "occurrence count assertion failed"
+	return 0
+}
+
+file_text() {
+	local path="$1"
+	python3 - "$path" <<'PY'
+import pathlib
+import sys
+
+print(pathlib.Path(sys.argv[1]).read_text())
+PY
+	return $?
+}
+
+test_setup_stage_contract() {
+	local text=""
+	text="$(file_text "$SETUP_SH")" || {
+		print_result "setup.sh is readable" 1 "$SETUP_SH"
+		return 0
+	}
+
+	assert_contains "setup.sh accepts --stage" "$text" "--stage <name>"
+	assert_contains "opencode scope maps to setup_opencode_cli" "$text" "opencode | \"\$SETUP_STAGE_OPENCODE\") printf '%s' \"\$SETUP_STAGE_OPENCODE\""
+	assert_contains "agents scope maps to deploy_maestro_agents" "$text" "agents | \"\$SETUP_STAGE_AGENTS\") printf '%s' \"\$SETUP_STAGE_AGENTS\""
+	assert_contains "hooks scope maps to setup_safety_hooks" "$text" "hooks | \"\$SETUP_STAGE_HOOKS\") printf '%s' \"\$SETUP_STAGE_HOOKS\""
+	assert_contains "tabby scope maps to setup_tabby" "$text" "tabby | \"\$SETUP_STAGE_TABBY\") printf '%s' \"\$SETUP_STAGE_TABBY\""
+	assert_contains "pulse scope maps to setup_supervisor_pulse" "$text" "pulse | \"\$SETUP_STAGE_PULSE\") printf '%s' \"\$SETUP_STAGE_PULSE\""
+	assert_contains "gui-desktop scope maps to native app installer" "$text" "gui-desktop | gui | app | \"\$SETUP_STAGE_GUI_DESKTOP\") printf '%s' \"\$SETUP_STAGE_GUI_DESKTOP\""
+	assert_contains "gui desktop default path is opt-in gated" "$text" "_time_step \"setup_gui_desktop_app_opt_in\" _setup_offer_gui_desktop_app"
+	assert_contains "gui desktop env flag enables install" "$text" "MAESTRO_GUI_DESKTOP_INSTALL"
+	assert_contains "gui desktop app dir can be configured" "$text" "MAESTRO_GUI_DESKTOP_APP_DIR"
+	assert_contains "existing gui desktop app refreshes during update" "$text" "Refreshing existing macOS"
+	assert_contains "gui desktop scoped stage runs installer" "$text" "_time_step \"\$SETUP_STAGE_GUI_DESKTOP\" setup_gui_desktop_app"
+	assert_contains "agents scoped stage registers opencode plugin" "$text" "_time_step \"setup_opencode_plugins\" setup_opencode_plugins"
+	assert_occurrence_count "scoped and noninteractive setup register opencode plugin" "$text" \
+		"_time_step \"setup_opencode_plugins\" setup_opencode_plugins" 2
+	assert_contains "unknown stages print actionable help" "$text" "Unknown setup stage/scope"
+	return 0
+}
+
+test_cli_scope_contract() {
+	local text=""
+	text="$(file_text "$MAESTRO_SH")" || {
+		print_result "maestro.sh is readable" 1 "$MAESTRO_SH"
+		return 0
+	}
+
+	assert_contains "maestro exposes setup command" "$text" "setup) cmd_setup \"\$@\" ;;"
+	assert_contains "maestro setup requires scope" "$text" "Usage: maestro setup --scope <scope>"
+	assert_contains "maestro setup lists gui-desktop scope" "$text" "gui-desktop  Install native macOS maestro.app only"
+	assert_contains "maestro setup passes scope to setup.sh" "$text" "bash \"\$setup_script\" --stage \"\$scope\""
+	assert_contains "maestro setup full preserves full setup" "$text" "bash \"\$setup_script\" --non-interactive"
+	return 0
+}
+
+test_gui_desktop_package_contract() {
+	local text=""
+	text="$(file_text "$PACKAGE_JSON")" || {
+		print_result "package.json is readable" 1 "$PACKAGE_JSON"
+		return 0
+	}
+
+	assert_contains "npm package includes Bun lockfile" "$text" '"bun.lock"'
+	assert_contains "npm package includes README metric badges" "$text" '"docs/metrics/"'
+	assert_contains "npm package includes GUI shared sources" "$text" '"packages/gui-shared/src/"'
+	assert_contains "npm package includes GUI API sources" "$text" '"packages/gui-api/src/"'
+	assert_contains "npm package includes GUI web sources" "$text" '"packages/gui-web/src/"'
+	assert_contains "npm package includes GUI web config" "$text" '"packages/gui-web/vite.config.ts"'
+	assert_contains "npm package includes GUI desktop installer" "$text" '"packages/gui-desktop/scripts/"'
+	return 0
+}
+
+test_gui_desktop_installer_contract() {
+	local installer="${REPO_ROOT}/packages/gui-desktop/scripts/install-macos-app.sh"
+	local text=""
+	text="$(file_text "$installer")" || {
+		print_result "GUI desktop installer is readable" 1 "$installer"
+		return 0
+	}
+
+	assert_contains "installer honours configured app dir env" "$text" 'MAESTRO_GUI_DESKTOP_APP_DIR'
+	assert_contains "installer keeps explicit app-dir override" "$text" '--app-dir'
+	assert_contains "installer dependency check includes new Zilla Slab font package" "$text" 'node_modules/@fontsource/zilla-slab'
+	python3 - "$installer" "$GUI_WEB_PACKAGE_JSON" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+installer_path = pathlib.Path(sys.argv[1])
+package_path = pathlib.Path(sys.argv[2])
+installer_text = installer_path.read_text()
+package_json = json.loads(package_path.read_text())
+expected = sorted(
+    f"node_modules/{name}"
+    for name in package_json.get("dependencies", {})
+    if name.startswith("@fontsource/")
+)
+actual = sorted(set(re.findall(r"node_modules/@fontsource/[a-z0-9-]+", installer_text)))
+if actual == expected:
+    sys.exit(0)
+print("expected font dependencies:", ", ".join(expected), file=sys.stderr)
+print("installer font dependencies:", ", ".join(actual), file=sys.stderr)
+sys.exit(1)
+PY
+	local rc=$?
+	if [[ "$rc" -eq 0 ]]; then
+		print_result "installer font dependency checks match GUI web package" 0
+		return 0
+	fi
+	print_result "installer font dependency checks match GUI web package" 1 "packages/gui-desktop/scripts/install-macos-app.sh is out of sync with packages/gui-web/package.json"
+	return 0
+}
+
+main() {
+	test_setup_stage_contract
+	test_cli_scope_contract
+	test_gui_desktop_package_contract
+	test_gui_desktop_installer_contract
+
+	printf '\nRan %s tests, %s failed\n' "$TESTS_RUN" "$TESTS_FAILED"
+	if [[ "$TESTS_FAILED" -ne 0 ]]; then
+		exit 1
+	fi
+	return 0
+}
+
+main "$@"

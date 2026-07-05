@@ -1,0 +1,285 @@
+---
+description: Package custom applications for Cloudron deployment
+mode: subagent
+tools:
+  read: true
+  write: true
+  edit: true
+  bash: true
+  glob: true
+  grep: true
+  webfetch: true
+  task: true
+---
+
+<!-- SPDX-License-Identifier: MIT -->
+<!-- SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest -->
+
+# Cloudron App Packaging Guide
+
+<!-- AI-CONTEXT-START -->
+
+## Quick Reference
+
+- **Docs**: [docs.cloudron.io/packaging](https://docs.cloudron.io/packaging/tutorial/) | [CLI Reference](https://docs.cloudron.io/packaging/cli/) | [Publishing](https://docs.cloudron.io/packaging/publishing/)
+- **Source Code**: [git.cloudron.io/packages](https://git.cloudron.io/packages) (200+ official app packages) | [By Technology](https://git.cloudron.io/explore/projects/topics)
+- **Forum**: [forum.cloudron.io/category/96](https://forum.cloudron.io/category/96/app-packaging-development)
+- **Base Image Tags**: https://hub.docker.com/r/cloudron/base/tags
+- **Sub-docs**: [addons-ref.md](cloudron-app-packaging-skill/addons-ref.md) | [manifest-ref.md](cloudron-app-packaging-skill/manifest-ref.md) | [cloudron-git-reference.md](cloudron-git-reference.md)
+
+**Golden Rules** (violations cause package failure):
+
+1. `/app/code` READ-ONLY at runtime — write to `/app/data`; `/run` and `/tmp` for ephemeral data (wiped on restart)
+2. Run as `cloudron` user (UID 1000): `exec gosu cloudron:cloudron`
+3. Use Cloudron addons (mysql, postgresql, redis) — never bundle databases
+4. Disable built-in auto-updaters — Cloudron manages updates via image replacement
+5. App receives HTTP — Cloudron's nginx terminates SSL
+6. Read env vars fresh on every start (values change across restarts) — never cache at startup
+7. Health check path must return HTTP 200 unauthenticated
+
+**File Structure**: `CloudronManifest.json`, `Dockerfile`, `start.sh`, `logo.png` (256x256).
+
+**CLI Workflow**:
+
+```bash
+npm install -g cloudron
+cloudron login my.cloudron.example && cloudron init
+cloudron build && cloudron install --location testapp
+cloudron build && cloudron update --app testapp  # iterate
+cloudron logs -f --app testapp
+cloudron exec --app testapp   # shell into container
+cloudron debug --app testapp  # pause app, writable fs
+```
+
+<!-- AI-CONTEXT-END -->
+
+## Pre-Packaging Assessment
+
+Score both axes before writing code. Initial packaging is ~25% of effort; SSO, upgrade testing, backup correctness, and maintenance are 75%. Structural 10+ or compliance 9+ → recommend against packaging.
+
+**Axis A: Structural Difficulty** (max 14: 0-2 Trivial, 3-4 Easy, 5-6 Medium, 7-9 Hard, 10+ Impractical)
+
+| Sub-axis | 0 (Easy) | 1 (Moderate) | 2-3 (Hard) |
+|----------|----------|--------------|------------|
+| Process count | Single | 2-4 | 5+ or separate containers |
+| Data storage | Cloudron addon / SQLite | — | Exotic (Elasticsearch, S3) |
+| Runtime | Node/Python/PHP (in base) | Go/Java/Ruby/Rust (binary) | Must compile from source |
+| Message broker | None | Redis (Celery/Bull) | Needs AMQP (LavinMQ) |
+| Filesystem writes | 0-3 symlinks | 4-8 symlinks | 9+ or needs source patching |
+| Authentication | Native LDAP/OIDC or none | Own auth, scriptable | Mandatory browser setup wizard |
+
+**Axis B: Compliance & Maintenance** (max 13: 0-2 Low, 3-5 Moderate, 6-8 High, 9+ Very High)
+
+| Sub-axis | 0 (Low) | 1-2 (Moderate) | 3 (High) |
+|----------|---------|----------------|----------|
+| SSO quality | Native LDAP/OIDC | Partial SSO / proxyauth | Auth conflicts (e.g., GoTrue) |
+| Upstream stability | Stable, semver | Occasional breaking changes | Pre-release, frequent breaks |
+| Backup complexity | Cloudron DB + /app/data | SQLite or custom backup | Internal stores needing snapshot APIs |
+| Platform fit | HTTP behind reverse proxy | WebSocket (needs nginx config) | Raw TCP/UDP or horizontal scaling |
+| Config drift | Env vars, no self-modification | Runtime plugin system | Self-updating, modifies own code |
+
+### Pre-Packaging Research
+
+1. Fetch upstream `docker-compose.yml` — **most valuable artifact** (reveals true dependency graph), `Dockerfile`, dependency files, auth docs (search "LDAP", "OIDC", "SSO"), releases page
+2. **Forum search**: `https://forum.cloudron.io/search?term=APP_NAME&in=titles`
+3. **App store**: `cloudron appstore search APP_NAME`
+4. **Reference apps**: [cloudron-git-reference.md](cloudron-git-reference.md) for apps by technology
+
+## Base Image
+
+**Always `FROM cloudron/base:5.0.0@sha256:04fd70dbd8ad6149c19de39e35718e024417c3e01dc9c6637eaf4a41ec4e596c`.** The final stage MUST use the SHA-pinned `cloudron/base` — platform tooling (file manager, web terminal, log viewer) depends on utilities in this image. Never start from upstream images — monolithic images bundle databases, reverse proxies, and init systems that conflict with Cloudron (e.g., docassemble: 25 symlinks, 15-20 min boot). Read upstream `docker-compose.yml` for dependencies, then install on `cloudron/base` via package manager. Current SHA tracked at [hub.docker.com/r/cloudron/base/tags](https://hub.docker.com/r/cloudron/base/tags) and in [`cloudron-app-packaging-skill.md`](cloudron-app-packaging-skill.md).
+
+**Multi-stage builds**: Only when build toolchain is exotic. Build in upstream image, `COPY --from` artifacts into final `cloudron/base` stage. **Alpine/musl warning**: musl-compiled binaries won't run on `cloudron/base` (Ubuntu/glibc) — always use glibc builder stage.
+
+**Base image contents (Cloudron 9.1.3)**: Ubuntu 24.04.1 LTS, Node.js 24.x (default; 22 LTS at `/usr/local/node-22.14.0`), Python 3.12.3, PHP 8.3.6 (redis/imagick/ldap/gd/mbstring), Nginx 1.24.0, Apache 2.4.58, Supervisor 4.2.5, gosu 1.17, gcc 13.3.0, ImageMagick 6.9.12, ffmpeg 6.1.1, psql 16.6, mysql 8.0.41, redis-cli 7.4.2, mongosh 2.4.0. Reviewed `cloudron/base:5.0.0` tag digest remains `sha256:04fd70dbd8ad6149c19de39e35718e024417c3e01dc9c6637eaf4a41ec4e596c`. **Not included** (install if needed): Ruby, Go, Java, Rust, pandoc, wkhtmltopdf.
+
+**Community assessment intake (reviewed at `047e4b07ce36`)**: import packaging lessons from the added assessment corpus rather than copying whole assessments. Good follow-up candidates include Huginn (medium structural, moderate maintenance, viable), while AppFlowy Cloud and ejabberd remain poor fits because of multi-service/auth/storage or network-port constraints. Prosody is the stronger XMPP path when raw TCP/TLS/DNS requirements are acceptable.
+
+## CloudronManifest.json
+
+Full field reference: [manifest-ref.md](cloudron-app-packaging-skill/manifest-ref.md). Addon options and env vars: [addons-ref.md](cloudron-app-packaging-skill/addons-ref.md).
+
+Run DB migrations on each start. `localstorage` is MANDATORY for persistent data. General env vars: `CLOUDRON_APP_ORIGIN` (full URL), `CLOUDRON_APP_DOMAIN` (domain only), `CLOUDRON=1`.
+
+**Memory limits** (`memoryLimit` in bytes: 256MB=268435456, 512MB=536870912, 1GB=1073741824): Static/PHP 128-256 MB, Node/Go/Rust 256-512 MB, PHP+workers/Python/Ruby 512-768 MB, Java/JVM 1024+ MB.
+
+**Dynamic worker count from memory limit** (matches upstream Cloudron skill: 1 worker per 150 MB, clamped 1-8):
+
+```bash
+if [[ -f /sys/fs/cgroup/cgroup.controllers ]]; then
+    mem=$(cat /sys/fs/cgroup/memory.max)
+    [[ "$mem" == "max" ]] && mem=$((2 * 1024 * 1024 * 1024))
+else
+    mem=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+fi
+workers=$(( mem / 1024 / 1024 / 150 ))      # 1 worker per 150MB
+workers=$(( workers > 8 ? 8 : workers ))    # cap at 8
+workers=$(( workers < 1 ? 1 : workers ))    # floor at 1
+```
+
+**TCP/UDP ports**: Declare in `tcpPorts` manifest field; exposed as env vars (e.g., `XMPP_C2S_PORT`). Apps handle their own TLS termination.
+
+**9.1+ features**: `persistentDirs` (persist dirs without `localstorage`), `backupCommand`/`restoreCommand` (custom backup), SQLite backup: `"localstorage": { "sqlite": { "paths": ["/app/data/db/app.db"] } }`.
+
+## Dockerfile Patterns
+
+```dockerfile
+FROM cloudron/base:5.0.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nginx php8.2-fpm php8.2-mysql \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app/code
+COPY --chown=cloudron:cloudron . /app/code/
+
+# Preserve defaults for first-run initialization
+RUN mkdir -p /app/code/defaults && \
+    mv /app/code/config /app/code/defaults/config 2>/dev/null || true && \
+    mv /app/code/storage /app/code/defaults/storage 2>/dev/null || true
+
+COPY start.sh /app/code/start.sh
+RUN chmod +x /app/code/start.sh
+EXPOSE 8000
+CMD ["/app/code/start.sh"]
+```
+
+**Runtime-specific patterns:**
+
+- **PHP**: Redirect temp paths to `/run`: `RUN rm -rf /var/lib/php/sessions && ln -s /run/php/sessions /var/lib/php/sessions`. FPM pool: `php_value[session.save_path] = /run/php/sessions`. In start.sh: `mkdir -p /run/php/sessions /run/php/uploads /run/php/tmp`.
+- **Node.js**: `RUN npm ci --production && npm cache clean --force` + `ENV NODE_ENV=production`. Keep `node_modules` in `/app/code`.
+- **Python**: `ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1` + `RUN pip install --no-cache-dir -r requirements.txt`.
+
+**nginx** — writable temp paths required (fails to start without):
+
+```nginx
+client_body_temp_path /run/nginx/client_body;
+proxy_temp_path /run/nginx/proxy;
+fastcgi_temp_path /run/nginx/fastcgi;
+server {
+    listen 8000;
+    root /app/code/public;
+    location / { try_files $uri $uri/ /index.php?$query_string; }
+}
+```
+
+In start.sh: `mkdir -p /run/nginx/client_body /run/nginx/proxy /run/nginx/fastcgi`
+
+**Apache**:
+
+```dockerfile
+RUN rm /etc/apache2/sites-enabled/* \
+    && sed -e 's,^ErrorLog.*,ErrorLog "/dev/stderr",' -i /etc/apache2/apache2.conf \
+    && sed -e "s,MaxSpareServers[^:].*,MaxSpareServers 5," -i /etc/apache2/mods-available/mpm_prefork.conf \
+    && a2disconf other-vhosts-access-log \
+    && echo "Listen 8000" > /etc/apache2/ports.conf
+```
+
+## start.sh Architecture
+
+Single-process: `exec gosu cloudron:cloudron <cmd>` directly. Multi-process: supervisord. Web servers managing own children (Apache, nginx): direct exec.
+
+```bash
+#!/bin/bash
+set -eu
+FIRST_RUN=false; [[ ! -f /app/data/.initialized ]] && FIRST_RUN=true
+
+mkdir -p /app/data/config /app/data/storage /app/data/logs /run/app /run/php /run/nginx
+ln -sfn /app/data/config /app/code/config
+ln -sfn /app/data/storage /app/code/storage
+ln -sfn /app/data/logs /app/code/logs
+
+[[ "$FIRST_RUN" == "true" ]] && cp -rn /app/code/defaults/config/* /app/data/config/ 2>/dev/null || true
+
+# Config injection (choose one):
+# A: envsubst < /app/code/config.template > /app/data/config/app.conf
+# B: sed -i "s|APP_URL=.*|APP_URL=${CLOUDRON_APP_ORIGIN}|" /app/data/config/.env
+
+sed -i "s|'auto_update' => true|'auto_update' => false|" /app/data/config/settings.php 2>/dev/null || true
+gosu cloudron:cloudron /app/code/bin/migrate --force
+chown -R cloudron:cloudron /app/data /run/app
+touch /app/data/.initialized
+exec gosu cloudron:cloudron node /app/code/server.js
+```
+
+**Multi-process supervisord.conf** (repeat `[program:*]` for each process):
+
+```ini
+[supervisord]
+nodaemon=true
+logfile=/dev/stdout
+logfile_maxbytes=0
+pidfile=/run/supervisord.pid
+
+[program:web]
+command=/app/code/bin/web-server
+directory=/app/code
+user=cloudron
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+```
+
+End of start.sh: `exec /usr/bin/supervisord --configuration /app/code/supervisord.conf`
+
+## Message Broker
+
+No AMQP addon in Cloudron. Two options:
+
+**Option A: Redis (preferred)** — if app supports Redis as broker (Celery does natively):
+
+```python
+CELERY_BROKER_URL = os.environ['CLOUDRON_REDIS_URL']
+CELERY_RESULT_BACKEND = os.environ['CLOUDRON_REDIS_URL']
+```
+
+**Option B: LavinMQ** — lightweight AMQP (~40 MB RAM, drop-in RabbitMQ replacement). Store data under `/app/data/lavinmq`, run as Supervisor program:
+
+```dockerfile
+RUN curl -fsSL https://packagecloud.io/cloudamqp/lavinmq/gpgkey | gpg --dearmor -o /usr/share/keyrings/lavinmq.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/lavinmq.gpg] https://packagecloud.io/cloudamqp/lavinmq/ubuntu/ noble main" \
+    > /etc/apt/sources.list.d/lavinmq.list && \
+    apt-get update && apt-get install -y lavinmq && rm -rf /var/cache/apt /var/lib/apt/lists/*
+```
+
+## Common Anti-Patterns
+
+| Anti-pattern | Wrong | Correct |
+|---|---|---|
+| Missing `exec` in gosu | `gosu cloudron:cloudron node server.js` | `exec gosu cloudron:cloudron node server.js` |
+| Non-idempotent start.sh | `cp config.json /app/data/` | `cp -n config.json /app/data/ 2>/dev/null \|\| true` |
+| Hardcoded URLs | `"https://myapp.example.com"` | `process.env.CLOUDRON_APP_ORIGIN` |
+
+## Upgrade & Migration
+
+Track version in `/app/data/.app_version`; compare on start to run per-version migration blocks. Migrations MUST be idempotent — use framework migration tracking (Laravel, Django, Rails) or raw SQL with `CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`.
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| App won't start | `cloudron logs --app testapp` / `cloudron debug --app testapp` |
+| Permission denied | `chown -R cloudron:cloudron /app/data` — check for writes to `/app/code` |
+| DB connection fails | Verify addon in manifest; `cloudron exec --app testapp` → `env \| grep CLOUDRON` |
+| Health check fails | `curl -v http://localhost:8000/health` — verify app listens on httpPort |
+| Memory exceeded | Increase `memoryLimit`; check for leaks; optimize worker counts |
+
+## Validation Checklist
+
+```text
+[ ] Fresh install + restart (cloudron restart --app) succeed
+[ ] Health check returns 200
+[ ] File uploads persist across restarts
+[ ] Database connections work; email works (if applicable)
+[ ] Memory stays within limit
+[ ] Upgrade from previous version works
+[ ] Backup/restore cycle works
+[ ] Auto-updater disabled; logs stream to stdout/stderr
+```
+
+## Publishing
+
+Fork https://git.cloudron.io/cloudron/appstore, add your app directory with manifest and icon, submit a merge request. See: https://docs.cloudron.io/packaging/publishing/

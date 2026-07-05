@@ -1,0 +1,671 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest
+"""
+Sync Tabby terminal profiles from maestro repos.json.
+
+Creates a profile for each registered repo with:
+- Unique bright tab colour (dark-mode friendly)
+- Matching built-in Tabby colour scheme (closest hue)
+- Direct OpenCode launch that leaves a shell open after exit
+- Grouped under "Projects"
+
+Existing profiles (matched by cwd path) are never overwritten.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import uuid
+from pathlib import Path
+
+from tabby_colour_utils import generate_tab_colour, find_closest_scheme
+from tabby_yaml_helpers import (
+    load_yaml_simple,
+    save_yaml,
+    extract_existing_cwds,
+    extract_group_id,
+    insert_profiles_block,
+)
+
+
+TABBY_OPENCODE_LAUNCH = "maestro opencode; exec zsh"
+TABBY_COMMAND_FIELD_OPENCODE = f"/bin/zsh -l -c '{TABBY_OPENCODE_LAUNCH}'"
+LEGACY_TABBY_OPENCODE_LAUNCH = "opencode; exec zsh"
+LEGACY_TABBY_COMMAND_FIELD_OPENCODE = "/bin/zsh -l -c 'opencode; exec zsh'"
+
+
+def is_linked_worktree(repo_path: str) -> bool:
+    """Return True iff ``repo_path`` is a linked git worktree (not the main one).
+
+    Deterministic replacement for the old string-heuristic that tried to guess
+    worktrees from the basename pattern ``repo.branch-name``. That heuristic
+    broke whenever the repo name itself contained a dot (domain-like names such
+    as ``wpallstars.com`` / ``example.io``) or when a worktree branch did not
+    start with one of the six hard-coded prefixes.
+
+    Detection rule: a linked worktree's ``git rev-parse --git-common-dir``
+    resolves to the *main* repo's ``.git`` directory, while the worktree's own
+    ``git rev-parse --git-dir`` resolves to ``<main>/.git/worktrees/<name>``.
+    For the main checkout (or any non-worktree clone) those two paths collapse
+    to the same ``.git`` directory. Comparing absolute paths gives a
+    heuristic-free answer that works for any repo name, branch name, or future
+    worktree convention.
+
+    Returns False on non-git paths or on any git invocation error — the caller
+    treats those as "not a worktree" so normal repos are never excluded.
+    """
+    git_dir = _run_git(repo_path, "rev-parse", "--git-dir")
+    common_dir = _run_git(repo_path, "rev-parse", "--git-common-dir")
+    if not git_dir or not common_dir:
+        return False
+
+    def _absolute(path: str) -> str:
+        # git may return a relative path (e.g. ``.git``) — resolve against
+        # ``repo_path`` so we always compare absolute paths.
+        if not os.path.isabs(path):
+            path = os.path.join(repo_path, path)
+        return os.path.realpath(path)
+
+    return _absolute(git_dir) != _absolute(common_dir)
+
+
+def _run_git(cwd: str, *args: str) -> str:
+    """Run ``git -C <cwd> <args...>`` and return stripped stdout, or ``""``."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def profile_name_from_path(repo_path: str) -> str:
+    """Derive a profile name from the repo path.
+
+    Uses the last path component, or last two if nested (e.g., cloudron/netbird-app).
+    """
+    parts = Path(repo_path).parts
+    if len(parts) >= 2:
+        parent = parts[-2]
+        name = parts[-1]
+        # If parent is a grouping dir (not Git or home), include it
+        if parent.lower() not in ("git", "repos", "projects", "src", "code",
+                                   os.path.basename(os.path.expanduser("~"))):
+            return f"{parent}/{name}"
+    return Path(repo_path).name
+
+
+def build_profile_yaml(
+    name: str,
+    cwd: str,
+    tab_colour: str,
+    scheme: dict,
+    group_id: str,
+) -> str:
+    """Build a YAML profile block as a string."""
+    profile_id = f"local:custom:{name.replace('/', '-')}:{uuid.uuid4()}"
+
+    # Build colour list
+    colours_yaml = ""
+    for c in scheme["colors"]:
+        colours_yaml += f"        - '{c}'\n"
+
+    profile = f"""  - name: {name}
+    icon: fas fa-terminal
+    options:
+      command: /bin/zsh
+      args:
+        - '-l'
+        - '-c'
+        - '{TABBY_OPENCODE_LAUNCH}'
+      env: {{}}
+      cwd: {cwd}
+    terminalColorScheme:
+      name: {scheme['name']}
+      foreground: '{scheme['foreground']}'
+      background: '{scheme['background']}'
+      cursor: '{scheme['cursor']}'
+      colors:
+{colours_yaml.rstrip()}
+    color: '{tab_colour}'
+    id: {profile_id}
+    group: {group_id}
+    type: local"""
+
+    return profile
+
+
+def build_group_yaml(group_id: str) -> str:
+    """Build a YAML group block."""
+    return f"""  - id: {group_id}
+    name: Projects"""
+
+
+def _normalise_yaml_scalar(value: str) -> str:
+    """Return a plain scalar value from a simple YAML string/list item."""
+    in_single_quote = False
+    in_double_quote = False
+    comment_start = len(value)
+    for index, char in enumerate(value):
+        if char == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+        elif char == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+        elif char == "#" and not in_single_quote and not in_double_quote:
+            comment_start = index
+            break
+    value = value[:comment_start].strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
+def _next_option_line(lines: list[str], start: int) -> str:
+    """Return the next non-comment line from ``start`` or an empty string."""
+    while start < len(lines):
+        line = lines[start]
+        if line.strip() and not line.lstrip().startswith("#"):
+            return line
+        start += 1
+    return ""
+
+
+def _parse_inline_args(value: str) -> list[str] | None:
+    """Parse a simple inline YAML list such as ``['-l', '-i']``."""
+    value = value.strip()
+    if not (value.startswith("[") and value.endswith("]")):
+        return None
+    inner = value[1:-1].strip()
+    if not inner:
+        return []
+    return [_normalise_yaml_scalar(part) for part in inner.split(",")]
+
+
+def _parse_block_args(lines: list[str]) -> list[str]:
+    """Parse simple ``- value`` YAML list entries from an args block."""
+    args: list[str] = []
+    for line in lines:
+        match = re.match(r"^\s*-\s*(.+?)\s*$", line)
+        if match:
+            args.append(_normalise_yaml_scalar(match.group(1)))
+    return args
+
+
+def _is_broken_opencode_args(args: list[str]) -> bool:
+    """Return True for the Tabby launch shape that breaks zsh job control."""
+    return args == ["-l", "-i", "-c", "opencode"]
+
+
+def _is_command_field_opencode(value: str) -> bool:
+    """Return True for the Tabby command-field shape that Tabby cannot exec."""
+    value = value.strip()
+    normalised = _normalise_yaml_scalar(value)
+    return (
+        value == TABBY_COMMAND_FIELD_OPENCODE
+        or value == LEGACY_TABBY_COMMAND_FIELD_OPENCODE
+        or normalised == TABBY_COMMAND_FIELD_OPENCODE
+        or normalised == LEGACY_TABBY_COMMAND_FIELD_OPENCODE
+    )
+
+
+def _is_legacy_direct_opencode_args(args: list[str]) -> bool:
+    """Return True for direct OpenCode args that still use the shared DB."""
+    return args == ["-l", "-c", LEGACY_TABBY_OPENCODE_LAUNCH]
+
+
+def _direct_opencode_args_block(args_indent: str, include_env: bool) -> list[str]:
+    """Build the direct Tabby args/env block for OpenCode profiles."""
+    child_indent = f"{args_indent}  "
+    block = [
+        f"{args_indent}args:",
+        f"{child_indent}- '-l'",
+        f"{child_indent}- '-c'",
+        f"{child_indent}- '{TABBY_OPENCODE_LAUNCH}'",
+    ]
+    if include_env:
+        block.append(f"{args_indent}env: {{}}")
+    return block
+
+
+def _line_indent_len(line: str) -> int:
+    """Return the number of leading spaces in ``line``."""
+    return len(line) - len(line.lstrip(" "))
+
+
+def _option_key_match(line: str) -> tuple[str, str] | None:
+    """Return ``(indent, key)`` for option-level keys we manage."""
+    match = re.match(r"^(?P<indent>\s*)(?P<key>args|command|env):(?:\s|$)", line)
+    if not match:
+        return None
+    return match.group("indent"), match.group("key")
+
+
+def _line_is_option_key(line: str, indent: str, key: str) -> bool:
+    """Return True if ``line`` is ``key`` at ``indent``."""
+    return bool(re.match(rf"^{re.escape(indent)}{re.escape(key)}:(?:\s|$)", line))
+
+
+def _has_prior_option_key(repaired: list[str], indent: str, key: str) -> bool:
+    """Return True if ``key`` already appeared in the current options block."""
+    indent_len = len(indent)
+    for previous in reversed(repaired):
+        if previous.strip() == "options:":
+            return False
+        if previous.strip() and _line_indent_len(previous) < indent_len:
+            return False
+        if _line_is_option_key(previous, indent, key):
+            return True
+    return False
+
+
+def _block_end(lines: list[str], start: int, base_indent_len: int) -> int:
+    """Return the first line after the scalar/list/mapping block at ``start``."""
+    block_end = start + 1
+    while block_end < len(lines):
+        next_line = lines[block_end]
+        if next_line.strip() and _line_indent_len(next_line) <= base_indent_len:
+            break
+        block_end += 1
+    return block_end
+
+
+def _tabby_autorun_env_end(lines: list[str], start: int, base_indent_len: int) -> int | None:
+    """Return env block end if it only carries ``TABBY_AUTORUN=opencode``."""
+    if start >= len(lines):
+        return None
+    env_line = lines[start]
+    env_indent_len = len(env_line) - len(env_line.lstrip(" "))
+    if env_indent_len != base_indent_len or env_line.strip() != "env:":
+        return None
+
+    block_end = start + 1
+    has_autorun = False
+    has_other_env = False
+    while block_end < len(lines):
+        next_line = lines[block_end]
+        if next_line.strip():
+            next_indent_len = len(next_line) - len(next_line.lstrip(" "))
+            if next_indent_len <= env_indent_len:
+                break
+            stripped = next_line.strip().strip("'").strip('"')
+            if stripped == "TABBY_AUTORUN: opencode":
+                has_autorun = True
+            else:
+                has_other_env = True
+        block_end += 1
+
+    if has_autorun and not has_other_env:
+        return block_end
+    return None
+
+
+def _line_mentions_opencode_launch(line: str) -> bool:
+    """Return True when a non-comment YAML line mentions an OpenCode launch."""
+    stripped = line.strip()
+    return bool(stripped and not stripped.startswith("#") and "opencode" in stripped)
+
+
+def _profile_mentions_opencode_launch(profile_lines: list[str]) -> bool:
+    """Return True when a profile block clearly targets OpenCode."""
+    return any(_line_mentions_opencode_launch(line) for line in profile_lines)
+
+
+def _profile_block_end(lines: list[str], start: int) -> int:
+    """Return the first line after the Tabby profile block at ``start``."""
+    return _block_end(lines, start, 2)
+
+
+def _repair_broken_opencode_launch_profile_block(config_text: str) -> tuple[str, int]:
+    """Repair fragile Tabby OpenCode launch profiles inside one profile block.
+
+    ``zsh -i -c`` enables interactive startup while executing a command string,
+    which can trigger Powerlevel10k/gitstatus job-control errors before the TUI
+    starts. The former ``TABBY_AUTORUN`` workaround can also fail silently when
+    shell startup does not run the hook, leaving users in a plain terminal. The
+    stable shape uses a non-interactive login command and leaves zsh open after
+    OpenCode exits.
+    """
+    lines = config_text.split("\n")
+    repaired: list[str] = []
+    repairs = 0
+    pending_command_field_indent: str | None = None
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+
+        command_match = re.match(r"^(?P<indent>\s*)command:\s*(?P<value>.*)$", line)
+        if command_match and _is_command_field_opencode(command_match.group("value")):
+            command_indent = command_match.group("indent")
+            if _has_prior_option_key(repaired, command_indent, "command"):
+                i = _block_end(lines, i, len(command_indent))
+                repairs += 1
+                continue
+            repaired.append(f"{command_indent}command: /bin/zsh")
+            pending_command_field_indent = command_indent
+            repairs += 1
+            i += 1
+            continue
+
+        option_key = _option_key_match(line)
+        if option_key is not None:
+            option_indent, key = option_key
+            if key != "args" or pending_command_field_indent != option_indent:
+                if _has_prior_option_key(repaired, option_indent, key):
+                    i = _block_end(lines, i, len(option_indent))
+                    repairs += 1
+                    continue
+
+        if pending_command_field_indent is not None:
+            pending_indent_len = len(pending_command_field_indent)
+            if (
+                line.strip()
+                and _line_indent_len(line) <= pending_indent_len
+                and not _line_is_option_key(line, pending_command_field_indent, "args")
+            ):
+                include_env = not _line_is_option_key(
+                    line, pending_command_field_indent, "env"
+                ) and not _has_prior_option_key(
+                    repaired, pending_command_field_indent, "env"
+                )
+                repaired.extend(
+                    _direct_opencode_args_block(
+                        pending_command_field_indent,
+                        include_env=include_env,
+                    )
+                )
+                pending_command_field_indent = None
+
+        match = re.match(r"^(?P<indent>\s*)args:\s*(?P<value>.*)$", line)
+        if not match:
+            repaired.append(line)
+            i += 1
+            continue
+
+        args_indent = match.group("indent")
+        args_indent_len = len(args_indent)
+        inline_args = _parse_inline_args(match.group("value"))
+        if inline_args is not None:
+            if pending_command_field_indent == args_indent:
+                next_line = _next_option_line(lines, i + 1)
+                include_env = not _line_is_option_key(
+                    next_line, args_indent, "env"
+                ) and not _has_prior_option_key(repaired, args_indent, "env")
+                repaired.extend(
+                    _direct_opencode_args_block(args_indent, include_env=include_env)
+                )
+                pending_command_field_indent = None
+            elif _is_broken_opencode_args(inline_args) or _is_legacy_direct_opencode_args(inline_args):
+                next_line = _next_option_line(lines, i + 1)
+                include_env = not _line_is_option_key(
+                    next_line, args_indent, "env"
+                ) and not _has_prior_option_key(repaired, args_indent, "env")
+                repaired.extend(
+                    _direct_opencode_args_block(args_indent, include_env=include_env)
+                )
+                repairs += 1
+            elif inline_args == ["-l", "-i"]:
+                env_end = _tabby_autorun_env_end(lines, i + 1, args_indent_len)
+                if env_end is not None:
+                    include_env = not _has_prior_option_key(repaired, args_indent, "env")
+                    repaired.extend(
+                        _direct_opencode_args_block(args_indent, include_env=include_env)
+                    )
+                    repairs += 1
+                    i = env_end
+                    continue
+                repaired.append(line)
+            else:
+                repaired.append(line)
+            i += 1
+            continue
+
+        block_end = _block_end(lines, i, args_indent_len)
+
+        block_args = _parse_block_args(lines[i + 1 : block_end])
+        if pending_command_field_indent == args_indent:
+            next_line = _next_option_line(lines, block_end)
+            include_env = not _line_is_option_key(
+                next_line, args_indent, "env"
+            ) and not _has_prior_option_key(repaired, args_indent, "env")
+            repaired.extend(_direct_opencode_args_block(args_indent, include_env=include_env))
+            pending_command_field_indent = None
+        elif _is_broken_opencode_args(block_args) or _is_legacy_direct_opencode_args(block_args):
+            next_line = _next_option_line(lines, block_end)
+            include_env = not _line_is_option_key(
+                next_line, args_indent, "env"
+            ) and not _has_prior_option_key(repaired, args_indent, "env")
+            repaired.extend(_direct_opencode_args_block(args_indent, include_env=include_env))
+            repairs += 1
+        elif block_args == ["-l", "-i"]:
+            env_end = _tabby_autorun_env_end(lines, block_end, args_indent_len)
+            if env_end is not None:
+                include_env = not _has_prior_option_key(repaired, args_indent, "env")
+                repaired.extend(_direct_opencode_args_block(args_indent, include_env=include_env))
+                repairs += 1
+                i = env_end
+                continue
+            repaired.extend(lines[i:block_end])
+        else:
+            repaired.extend(lines[i:block_end])
+        i = block_end
+
+    if pending_command_field_indent is not None:
+        include_env = not _has_prior_option_key(repaired, pending_command_field_indent, "env")
+        repaired.extend(
+            _direct_opencode_args_block(
+                pending_command_field_indent,
+                include_env=include_env,
+            )
+        )
+
+    return "\n".join(repaired), repairs
+
+
+def repair_broken_opencode_launch_profiles(config_text: str) -> tuple[str, int]:
+    """Repair fragile OpenCode profiles without touching custom profiles.
+
+    Tabby configs can contain hand-authored profiles for local web servers,
+    shells, and other commands. The OpenCode repair logic manages ``command``,
+    ``args``, and ``env`` keys, so scope it to profile blocks that explicitly
+    mention OpenCode and preserve all other profile blocks byte-for-byte.
+    """
+    lines = config_text.split("\n")
+    repaired: list[str] = []
+    repairs = 0
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        if not line.startswith("  - name:"):
+            repaired.append(line)
+            i += 1
+            continue
+
+        block_end = _profile_block_end(lines, i)
+        profile_lines = lines[i:block_end]
+        if not _profile_mentions_opencode_launch(profile_lines):
+            repaired.extend(profile_lines)
+            i = block_end
+            continue
+
+        repaired_block, repaired_count = _repair_broken_opencode_launch_profile_block(
+            "\n".join(profile_lines)
+        )
+        repaired.extend(repaired_block.split("\n"))
+        repairs += repaired_count
+        i = block_end
+
+    return "\n".join(repaired), repairs
+
+
+def ensure_groups_section(config_text: str, group_id: str) -> str:
+    """Ensure the groups section exists with a Projects group."""
+    if re.search(r"^groups:", config_text, re.MULTILINE):
+        # Check if Projects group exists
+        existing_id = extract_group_id(config_text)
+        if existing_id:
+            return config_text  # Already has Projects group
+        # Add Projects group to existing groups section
+        group_entry = build_group_yaml(group_id)
+        config_text = re.sub(
+            r"^(groups:\s*\n)",
+            f"\\1{group_entry}\n",
+            config_text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    else:
+        # Add groups section before the first non-profile top-level key
+        # or at the end
+        group_section = f"groups:\n{build_group_yaml(group_id)}\n"
+        # Insert before configSync, hotkeys, terminal, ssh, etc.
+        for key in ("configSync:", "hotkeys:", "terminal:", "ssh:", "clickableLinks:"):
+            if key in config_text:
+                config_text = config_text.replace(key, f"{group_section}{key}", 1)
+                return config_text
+        # Fallback: append
+        config_text += f"\n{group_section}"
+    return config_text
+
+
+def get_repos(repos_json_path: str) -> list[dict]:
+    """Load repos from repos.json, filtering to those suitable for profiles.
+
+    Excludes:
+    - entries without a ``path`` field
+    - paths that don't exist on disk
+    - linked git worktrees (detected via :func:`is_linked_worktree`)
+
+    Worktrees are excluded because each worktree shares its parent repo's
+    purpose; creating a separate Tabby profile per branch would multiply
+    entries every time a branch is checked out. The canonical repo's profile
+    is sufficient — users ``cd`` into worktrees from the canonical terminal
+    when they need them.
+    """
+    with open(repos_json_path) as f:
+        data = json.load(f)
+
+    repos = data.get("initialized_repos", [])
+    result = []
+    for repo in repos:
+        path = repo.get("path", "")
+        if not path:
+            continue
+        path = os.path.expanduser(path)
+        if not os.path.isdir(path):
+            continue
+        if is_linked_worktree(path):
+            continue
+        result.append({"path": path, "name": profile_name_from_path(path), "repo": repo})
+    return result
+
+
+def show_status(repos: list[dict], existing_cwds: set[str]) -> None:
+    """Print status of repos vs existing Tabby profiles."""
+    print(f"Repos in repos.json: {len(repos)}")
+    has_profile = 0
+    needs_profile = 0
+    for repo in repos:
+        if repo["path"] in existing_cwds:
+            has_profile += 1
+            print(f"  [exists] {repo['name']} -> {repo['path']}")
+        else:
+            needs_profile += 1
+            print(f"  [new]    {repo['name']} -> {repo['path']}")
+    print(f"\nExisting: {has_profile}, New: {needs_profile}")
+    if needs_profile > 0:
+        print("Note: existing profiles are never modified — only new ones are created.")
+
+
+def ensure_group(config_text: str) -> tuple[str, str]:
+    """Return (config_text, group_id), creating a Projects group if needed."""
+    group_id = extract_group_id(config_text)
+    if not group_id:
+        group_id = str(uuid.uuid4())
+        config_text = ensure_groups_section(config_text, group_id)
+    return config_text, group_id
+
+
+def build_new_profiles(
+    repos: list[dict], existing_cwds: set[str], group_id: str
+) -> list[tuple]:
+    """Build profile entries for repos that don't yet have a Tabby profile."""
+    new_profiles = []
+    for repo in repos:
+        if repo["path"] not in existing_cwds:
+            tab_colour = generate_tab_colour(repo["path"])
+            scheme = find_closest_scheme(tab_colour)
+            profile_yaml = build_profile_yaml(
+                name=repo["name"],
+                cwd=repo["path"],
+                tab_colour=tab_colour,
+                scheme=scheme,
+                group_id=group_id,
+            )
+            new_profiles.append((repo, profile_yaml, tab_colour, scheme["name"]))
+    return new_profiles
+
+
+def sync_profiles(args: argparse.Namespace) -> None:
+    """Perform the profile sync: discover new repos and insert their profiles."""
+    repos = get_repos(args.repos_json)
+    config_text = load_yaml_simple(args.tabby_config)
+    existing_cwds = extract_existing_cwds(config_text)
+
+    config_text, repaired_count = repair_broken_opencode_launch_profiles(config_text)
+
+    config_text, group_id = ensure_group(config_text)
+    new_profiles = build_new_profiles(repos, existing_cwds, group_id)
+
+    if not new_profiles:
+        if repaired_count:
+            save_yaml(args.tabby_config, config_text)
+            print(f"Repaired {repaired_count} existing Tabby profile(s).")
+        else:
+            print("All repos already have Tabby profiles. Nothing to do.")
+        return
+
+    new_block = "\n".join(p[1] for p in new_profiles)
+    config_text = insert_profiles_block(config_text, new_block)
+    save_yaml(args.tabby_config, config_text)
+
+    if repaired_count:
+        print(f"Repaired {repaired_count} existing Tabby profile(s).")
+    print(f"Created {len(new_profiles)} new Tabby profile(s):")
+    for repo, _, colour, scheme_name in new_profiles:
+        print(f"  + {repo['name']} (colour: {colour}, scheme: {scheme_name})")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Sync Tabby profiles from repos.json")
+    parser.add_argument("--repos-json", required=True, help="Path to repos.json")
+    parser.add_argument("--tabby-config", required=True, help="Path to Tabby config.yaml")
+    parser.add_argument("--status-only", action="store_true", help="Show status without modifying")
+    args = parser.parse_args()
+
+    repos = get_repos(args.repos_json)
+    config_text = load_yaml_simple(args.tabby_config)
+    existing_cwds = extract_existing_cwds(config_text)
+
+    if args.status_only:
+        show_status(repos, existing_cwds)
+        return
+
+    sync_profiles(args)
+
+
+if __name__ == "__main__":
+    main()

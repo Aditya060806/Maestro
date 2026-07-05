@@ -1,0 +1,25 @@
+# systemd user service for screen time snapshots (Linux equivalent of launchd plist)
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp maestro-screen-time-snapshot.service ~/.config/systemd/user/
+#   cp maestro-screen-time-snapshot.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now maestro-screen-time-snapshot.timer
+#
+# Check status:
+#   systemctl --user status maestro-screen-time-snapshot.timer
+#   journalctl --user -u maestro-screen-time-snapshot.service
+
+[Unit]
+Description=maestro screen time snapshot
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.maestro/agents/scripts/screen-time-helper.sh snapshot
+StandardOutput=append:%h/.maestro/.agent-workspace/logs/screen-time-snapshot.log
+StandardError=append:%h/.maestro/.agent-workspace/logs/screen-time-snapshot.log
+
+[Install]
+WantedBy=default.target

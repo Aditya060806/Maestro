@@ -1,0 +1,1 @@
+../../seo/seo-ai-baseline.md

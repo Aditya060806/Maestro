@@ -1,0 +1,342 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest
+#
+# test-pulse-merge-routine-standalone.sh — t3036 / GH#21616 regression guard.
+#
+# Asserts that pulse-merge-routine.sh (a standalone helper invoked by launchd
+# every 120s) bootstraps successfully WITHOUT pulse-wrapper.sh's environment
+# in scope. The routine sources pulse-merge.sh which references
+# PULSE_START_EPOCH, unlock_issue_after_worker, and fast_fail_reset — all
+# normally set by pulse-wrapper.sh. Without explicit defaults / sourcing,
+# `set -euo pipefail` in the routine causes a hard fail on the first
+# unbound variable, and stderr noise on every merged/closed PR.
+#
+# Root cause (t3036, GH#21616):
+#   1. pulse-merge-routine.sh ran under `set -euo pipefail` (line 42) but did
+#      NOT initialise PULSE_START_EPOCH. pulse-merge.sh:326 references it
+#      inside _handle_post_merge_actions:
+#        _merge_elapsed=$(($(date +%s) - PULSE_START_EPOCH))
+#      Hard fail under set -u. Every launchd invocation crashed before
+#      writing the last-run marker.
+#   2. unlock_issue_after_worker (defined in pulse-dispatch-core.sh) and
+#      fast_fail_reset (defined in pulse-fast-fail.sh) were called from
+#      pulse-merge.sh:338,383,385 but neither library was sourced by the
+#      routine — every successful merge/close emitted 'command not found'
+#      stderr noise.
+#
+# Fix (t3036, this PR):
+#   - Initialise PULSE_START_EPOCH in the env-var defaults block.
+#   - Source pulse-dispatch-core.sh and pulse-fast-fail.sh in the source chain.
+#
+# Test scenarios (all run with PULSE_START_EPOCH UNSET to catch regressions):
+#   1. --help completes with exit 0 and no stderr noise
+#   2. --help emits no 'command not found' errors
+#   3. --help emits no 'unbound variable' errors
+#   4. The routine file calls shared PULSE_START_EPOCH bootstrap (grep guard)
+#   5. The routine file sources pulse-dispatch-core.sh (grep guard)
+#   6. The routine file sources pulse-fast-fail.sh (grep guard)
+#   7. runtime helpers define _should_setup_noninteractive_pulse_merge_routine
+#   8. setup.sh call site uses the new helper (not the generic gate)
+#   9. scheduler uses timeout-protected pulse-merge-routine
+#   10. merge LaunchAgent uses normal spawn priority with explicit KeepAlive=false
+#   11. standalone PATH repair keeps the framework gh shim first
+#   12. leading --repo defaults to the run subcommand (GH#25698)
+
+set -uo pipefail
+
+SCRIPT_DIR_TEST="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
+SCRIPTS_DIR="$(cd "${SCRIPT_DIR_TEST}/.." && pwd)" || exit 1
+REPO_ROOT="$(cd "${SCRIPTS_DIR}/../.." && pwd)" || exit 1
+
+ROUTINE_FILE="${SCRIPTS_DIR}/pulse-merge-routine.sh"
+SETUP_FILE="${REPO_ROOT}/setup.sh"
+RUNTIME_HELPERS_FILE="${REPO_ROOT}/.agents/scripts/setup/_runtime_helpers.sh"
+
+if [[ -t 1 ]]; then
+	TEST_GREEN=$'\033[0;32m'
+	TEST_RED=$'\033[0;31m'
+	TEST_YELLOW=$'\033[1;33m'
+	TEST_NC=$'\033[0m'
+else
+	TEST_GREEN="" TEST_RED="" TEST_YELLOW="" TEST_NC=""
+fi
+
+TESTS_RUN=0
+TESTS_FAILED=0
+
+pass() {
+	local name="$1"
+	TESTS_RUN=$((TESTS_RUN + 1))
+	printf '  %sPASS%s %s\n' "$TEST_GREEN" "$TEST_NC" "$name"
+	return 0
+}
+
+fail() {
+	local name="$1"
+	local detail="${2:-}"
+	TESTS_RUN=$((TESTS_RUN + 1))
+	TESTS_FAILED=$((TESTS_FAILED + 1))
+	printf '  %sFAIL%s %s\n' "$TEST_RED" "$TEST_NC" "$name"
+	if [[ -n "$detail" ]]; then
+		printf '       %s\n' "$detail"
+	fi
+	return 0
+}
+
+skip() {
+	local name="$1"
+	local reason="${2:-}"
+	printf '  %sSKIP%s %s (%s)\n' "$TEST_YELLOW" "$TEST_NC" "$name" "$reason"
+	return 0
+}
+
+if [[ ! -f "$ROUTINE_FILE" ]]; then
+	printf '%sFATAL%s pulse-merge-routine.sh not found at %s\n' \
+		"$TEST_RED" "$TEST_NC" "$ROUTINE_FILE"
+	exit 1
+fi
+
+printf '%sRunning pulse-merge-routine standalone tests (t3036, GH#21616)%s\n' \
+	"$TEST_GREEN" "$TEST_NC"
+
+# =============================================================================
+# Test 1: --help completes with exit 0 (catches Bug 2 PULSE_START_EPOCH crash)
+# =============================================================================
+# Even with PULSE_START_EPOCH unset, the routine should bootstrap successfully
+# enough to print help. Pre-fix, this would crash under `set -u` if any
+# pulse-merge.sh code path that touches PULSE_START_EPOCH ran during sourcing.
+printf '\n=== Bootstrap tests (PULSE_START_EPOCH unset) ===\n'
+
+unset PULSE_START_EPOCH PULSE_MERGE_BATCH_LIMIT
+
+help_stderr=$(LC_ALL=C timeout 30 "$ROUTINE_FILE" --help 2>&1 >/dev/null) || true
+help_exit=$(LC_ALL=C timeout 30 "$ROUTINE_FILE" --help >/dev/null 2>&1; printf '%s' "$?")
+
+if [[ "$help_exit" == "0" ]]; then
+	pass "1: --help exits 0 with PULSE_START_EPOCH unset"
+else
+	fail "1: --help exits 0 with PULSE_START_EPOCH unset" \
+		"exit=$help_exit, stderr=$help_stderr"
+fi
+
+# =============================================================================
+# Test 2: No 'command not found' errors during bootstrap
+# =============================================================================
+# Pre-fix, sourcing pulse-merge.sh emitted 'unlock_issue_after_worker: command
+# not found' and 'fast_fail_reset: command not found' on every PR processed.
+if printf '%s\n' "$help_stderr" | grep -q 'command not found'; then
+	fail "2: no 'command not found' errors" \
+		"stderr: $help_stderr"
+else
+	pass "2: no 'command not found' errors"
+fi
+
+# =============================================================================
+# Test 3: No 'unbound variable' errors during bootstrap
+# =============================================================================
+# Pre-fix, line 326 of pulse-merge.sh (_merge_elapsed=$(($(date +%s) -
+# PULSE_START_EPOCH))) failed under `set -u` when PULSE_START_EPOCH was unset.
+if printf '%s\n' "$help_stderr" | grep -q 'unbound variable'; then
+	fail "3: no 'unbound variable' errors" \
+		"stderr: $help_stderr"
+else
+	pass "3: no 'unbound variable' errors"
+fi
+
+# =============================================================================
+# Test 4: PULSE_START_EPOCH is initialised via shared bootstrap
+# =============================================================================
+printf '\n=== Source-content guards ===\n'
+
+if grep -qE '^maestro_ensure_pulse_start_epoch$' "$ROUTINE_FILE"; then
+	pass "4: PULSE_START_EPOCH initialised via shared bootstrap"
+else
+	fail "4: PULSE_START_EPOCH initialised via shared bootstrap" \
+		"missing maestro_ensure_pulse_start_epoch call"
+fi
+
+# =============================================================================
+# Test 5: pulse-dispatch-core.sh is sourced (provides unlock_issue_after_worker)
+# =============================================================================
+if grep -qE 'source "\$\{SCRIPT_DIR\}/pulse-dispatch-core\.sh"' "$ROUTINE_FILE"; then
+	pass "5: pulse-dispatch-core.sh sourced (unlock_issue_after_worker)"
+else
+	fail "5: pulse-dispatch-core.sh sourced (unlock_issue_after_worker)" \
+		"missing 'source ... pulse-dispatch-core.sh' line"
+fi
+
+# =============================================================================
+# Test 6: pulse-fast-fail.sh is sourced (provides fast_fail_reset)
+# =============================================================================
+if grep -qE 'source "\$\{SCRIPT_DIR\}/pulse-fast-fail\.sh"' "$ROUTINE_FILE"; then
+	pass "6: pulse-fast-fail.sh sourced (fast_fail_reset)"
+else
+	fail "6: pulse-fast-fail.sh sourced (fast_fail_reset)" \
+		"missing 'source ... pulse-fast-fail.sh' line"
+fi
+
+if grep -qF "export PATH=\"\${SCRIPT_DIR}:\${PATH}\"" "$ROUTINE_FILE"; then
+	pass "6b: routine re-prioritises framework scripts in PATH"
+else
+	fail "6b: routine re-prioritises framework scripts in PATH" \
+		"missing SCRIPT_DIR PATH prepend after script-dir resolution"
+fi
+
+# =============================================================================
+# Test 7: runtime helpers define the escape-hatch helper (Bug 1 fix)
+# =============================================================================
+printf '\n=== setup.sh escape-hatch guard (Bug 1) ===\n'
+
+if [[ ! -f "$SETUP_FILE" ]]; then
+	skip "7: runtime helpers define _should_setup_noninteractive_pulse_merge_routine" \
+		"setup.sh not found at $SETUP_FILE"
+	skip "8: setup.sh call site uses new helper" \
+		"setup.sh not found at $SETUP_FILE"
+else
+	if [[ -f "$RUNTIME_HELPERS_FILE" ]] && grep -qE '^_should_setup_noninteractive_pulse_merge_routine\(\)' "$RUNTIME_HELPERS_FILE"; then
+		pass "7: runtime helpers define _should_setup_noninteractive_pulse_merge_routine"
+	else
+		fail "7: runtime helpers define _should_setup_noninteractive_pulse_merge_routine" \
+			"missing function definition in $RUNTIME_HELPERS_FILE"
+	fi
+
+	# =========================================================================
+	# Test 8: setup.sh call site uses the new helper (not the generic gate)
+	# =========================================================================
+	# The non-interactive scheduler block must call the new helper for the
+	# pulse-merge-routine entry, not _should_setup_noninteractive_scheduler.
+	# Pattern: an `if _should_setup_noninteractive_pulse_merge_routine; then`
+	# line must be immediately followed (within 3 lines, allowing comments) by
+	# either `setup_pulse_merge_routine` directly or the timed wrapper form
+	# `_time_step "setup_pulse_merge_routine" setup_pulse_merge_routine`.
+	# Use portable awk regex (no \b word boundary — BSD awk on macOS doesn't
+	# support it).
+	if awk '
+		BEGIN { in_block=0; lines_since_gate=0; found_call=0 }
+		/^[[:space:]]*if _should_setup_noninteractive_pulse_merge_routine[;[:space:]]/ {
+			in_block=1
+			lines_since_gate=0
+			next
+		}
+		in_block {
+			lines_since_gate++
+			if ($0 ~ /^[[:space:]]+setup_pulse_merge_routine([[:space:]]|$)/ ||
+				($0 ~ /_time_step[[:space:]]+"setup_pulse_merge_routine"/ &&
+					$0 ~ /setup_pulse_merge_routine([[:space:]]|$)/)) {
+				found_call=1
+				exit
+			}
+			if (lines_since_gate > 3 || /^[[:space:]]*fi[[:space:]]*$/) {
+				in_block=0
+			}
+		}
+		END { exit (found_call) ? 0 : 1 }
+	' "$SETUP_FILE"; then
+		pass "8: setup.sh call site uses new helper"
+	else
+		fail "8: setup.sh call site uses new helper" \
+			"'if _should_setup_noninteractive_pulse_merge_routine; then' not followed by 'setup_pulse_merge_routine' call"
+	fi
+fi
+
+SCHEDULERS_PLATFORM_FILE="${REPO_ROOT}/.agents/scripts/setup/modules/schedulers-platform.sh"
+if [[ -f "$SCHEDULERS_PLATFORM_FILE" ]]; then
+	if awk '
+		BEGIN { in_func=0; has_routine_script=0; has_merge_only_arg=0 }
+		/^_install_pulse_merge_routine_launchd\(\)/ { in_func=1; next }
+		in_func && /^\}/ { in_func=0 }
+		in_func && /^[[:space:]]*<string>\$\{_xml_pmr_script\}<\/string>[[:space:]]*$/ { has_routine_script=1 }
+		in_func && /^[[:space:]]*<string>--merge-only<\/string>[[:space:]]*$/ { has_merge_only_arg=1 }
+		END { exit (has_routine_script && !has_merge_only_arg) ? 0 : 1 }
+	' "$SCHEDULERS_PLATFORM_FILE"; then
+		pass "9: scheduler uses timeout-protected pulse-merge-routine"
+	else
+		fail "9: scheduler uses timeout-protected pulse-merge-routine" \
+			"merge LaunchAgent must run pulse-merge-routine.sh directly and must not pass --merge-only"
+	fi
+else
+	skip "9: scheduler uses timeout-protected pulse-merge-routine" \
+		".agents/scripts/setup/modules/schedulers-platform.sh not found"
+fi
+
+if [[ -f "$SCHEDULERS_PLATFORM_FILE" ]]; then
+	if awk '
+		BEGIN { in_func=0; has_background=0; has_low_io=0; has_nice=0; has_keepalive_false=0; saw_keepalive=0 }
+		/^_install_pulse_merge_routine_launchd\(\)/ { in_func=1; next }
+		in_func && /^\}/ { in_func=0 }
+		in_func && index($0, "<key>ProcessType</key>") { has_background=1 }
+		in_func && index($0, "<key>LowPriorityBackgroundIO</key>") { has_low_io=1 }
+		in_func && index($0, "<key>Nice</key>") { has_nice=1 }
+		in_func && index($0, "<key>KeepAlive</key>") { saw_keepalive=1; next }
+		in_func && saw_keepalive { if (index($0, "<false/>")) has_keepalive_false=1; saw_keepalive=0 }
+		END { exit (!has_background && !has_low_io && !has_nice && has_keepalive_false) ? 0 : 1 }
+	' "$SCHEDULERS_PLATFORM_FILE"; then
+		pass "10: merge LaunchAgent uses normal spawn priority with explicit KeepAlive=false"
+	else
+		fail "10: merge LaunchAgent uses normal spawn priority with explicit KeepAlive=false" \
+			"pulse merge LaunchAgent must not set ProcessType/LowPriorityBackgroundIO/Nice and must set KeepAlive=false"
+	fi
+else
+	skip "10: merge LaunchAgent uses normal spawn priority with explicit KeepAlive=false" \
+		".agents/scripts/setup/modules/schedulers-platform.sh not found"
+fi
+
+printf '\n=== Argument parser regression guards ===\n'
+
+PARSER_HARNESS=$(mktemp "${TMPDIR:-/tmp}/pmr-parser-harness-XXXXXX")
+trap 'rm -f "$PARSER_HARNESS"' EXIT
+
+cat >"$PARSER_HARNESS" <<'PARSER_HARNESS_EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+
+RUNNER_LOG_FILE=/dev/null
+PULSE_MERGE_ROUTINE_TIMEOUT_SECONDS=30
+
+_pmr_log() { return 0; }
+cmd_help() { return 0; }
+cmd_dry_run() { return 0; }
+cmd_run() {
+	if [[ -z "${REPOS_JSON:-}" ]]; then
+		return 1
+	fi
+	if grep -q '"slug":"example/repo"' "$REPOS_JSON"; then
+		return 0
+	fi
+	return 1
+}
+
+# Extract only _pmr_main so this test does not run the real merge routine.
+# shellcheck disable=SC1090
+source <(awk '
+	/^_pmr_main\(\)/ { capture=1 }
+	capture { print }
+	capture && /^}/ { capture=0 }
+' "$ROUTINE_FILE")
+
+_pmr_main --repo example/repo
+PARSER_HARNESS_EOF
+
+chmod +x "$PARSER_HARNESS"
+parser_output=$(ROUTINE_FILE="$ROUTINE_FILE" bash "$PARSER_HARNESS" 2>&1)
+parser_rc=$?
+
+if [[ "$parser_rc" -eq 0 ]]; then
+	pass "12: leading --repo defaults to run subcommand"
+else
+	fail "12: leading --repo defaults to run subcommand" \
+		"harness rc=${parser_rc}, output=${parser_output}"
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+printf '\n'
+if [[ $TESTS_FAILED -eq 0 ]]; then
+	printf '%s%d/%d tests passed%s\n' "$TEST_GREEN" "$TESTS_RUN" "$TESTS_RUN" "$TEST_NC"
+	exit 0
+else
+	printf '%s%d/%d tests failed%s\n' "$TEST_RED" "$TESTS_FAILED" "$TESTS_RUN" "$TEST_NC"
+	exit 1
+fi

@@ -1,0 +1,144 @@
+name: Issue Triage Gate
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    concurrency:
+      group: issue-triage-${{ github.event.issue.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Check author association and apply triage label
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const author = issue.user.login;
+            const association = issue.author_association;
+
+            // Bot accounts always bypass triage (github-actions[bot], dependabot, etc.)
+            if (issue.user.type === 'Bot') {
+              console.log(`Author ${author} is a bot — bypassing triage`);
+              return;
+            }
+
+            // Maintainers and collaborators bypass triage
+            // OWNER, MEMBER, COLLABORATOR are trusted roles
+            const trustedRoles = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+
+            if (trustedRoles.includes(association)) {
+              console.log(`Author ${author} has role ${association} — bypassing triage`);
+
+              // Remove needs-maintainer-review if the YAML form template added it
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  name: 'needs-maintainer-review'
+                });
+              } catch (e) {
+                // Label may not exist yet — that's fine
+              }
+              return;
+            }
+
+            // GH#18197: file-size-debt and function-complexity-debt issues are exclusively
+            // machine-generated. A non-maintainer creating one is either a mistake or an
+            // attempt to bypass the assignee gate. Strip the label and apply needs-maintainer-review.
+            //
+            // GH#18623: origin:worker is ALSO machine-only — strip it independently of
+            // file-size-debt/function-complexity-debt. A non-maintainer opening an issue with
+            // only the origin:worker label would previously keep that label, since the stripping
+            // logic was nested inside the debt-label check.
+            const issueLabels = (issue.labels || []).map(l => l.name);
+            const debtLabels = ['file-size-debt', 'function-complexity-debt'];
+            for (const debtLabel of debtLabels) {
+              if (issueLabels.includes(debtLabel)) {
+                console.log(`Non-maintainer ${author} created issue with ${debtLabel} label — stripping label and gating`);
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    name: debtLabel
+                  });
+                } catch (e) {
+                  // Label may not be present — fine
+                }
+              }
+            }
+            if (issueLabels.includes('origin:worker')) {
+              console.log(`Non-maintainer ${author} created issue with origin:worker label — stripping label`);
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  name: 'origin:worker'
+                });
+              } catch (e) {
+                // Label may not be present — fine
+              }
+            }
+
+            console.log(`Author ${author} has role ${association} — applying triage gate`);
+
+            // Ensure needs-maintainer-review label exists
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'needs-maintainer-review',
+                description: 'External issue awaiting maintainer review before pipeline pickup',
+                color: 'FBCA04'
+              });
+            } catch (e) {
+              // Label already exists — expected
+            }
+
+            // Ensure the label is applied (template may have added it, but belt-and-suspenders)
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              labels: ['needs-maintainer-review']
+            });
+
+            // Remove any auto-dispatch labels that could trigger the pipeline
+            for (const label of ['status:available', 'auto-dispatch']) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  name: label
+                });
+              } catch (e) {
+                // Label not present — fine
+              }
+            }
+
+            // Post a welcome comment
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: [
+                `Thanks for the report, @${author}.`,
+                '',
+                'This issue has been queued for maintainer review. A maintainer will review it and either:',
+                '- **Approve** it using: `sudo maestro approve issue ' + issue.number + '`',
+                '- **Ask for more information** if the report needs clarification',
+                '- **Close** it if it\'s a duplicate or out of scope',
+                '',
+                '**Tip:** For faster, higher-quality issue reporting, use `/log-issue-maestro` in your AI assistant session. It gathers diagnostics automatically and checks for duplicates.'
+              ].join('\n')
+            });

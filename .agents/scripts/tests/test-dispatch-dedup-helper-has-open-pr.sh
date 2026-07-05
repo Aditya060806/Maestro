@@ -1,0 +1,577 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit
+HELPER_SCRIPT="${SCRIPT_DIR}/../dispatch-dedup-helper.sh"
+
+readonly TEST_RED='\033[0;31m'
+readonly TEST_GREEN='\033[0;32m'
+readonly TEST_RESET='\033[0m'
+
+TESTS_RUN=0
+TESTS_FAILED=0
+
+TEST_ROOT=""
+GH_FIXTURE_FILE=""
+GH_PR_VIEW_FIXTURE_FILE=""
+
+print_result() {
+	local test_name="$1"
+	local passed="$2"
+	local message="${3:-}"
+	TESTS_RUN=$((TESTS_RUN + 1))
+
+	if [[ "$passed" -eq 0 ]]; then
+		printf '%bPASS%b %s\n' "$TEST_GREEN" "$TEST_RESET" "$test_name"
+		return 0
+	fi
+
+	printf '%bFAIL%b %s\n' "$TEST_RED" "$TEST_RESET" "$test_name"
+	if [[ -n "$message" ]]; then
+		printf '       %s\n' "$message"
+	fi
+	TESTS_FAILED=$((TESTS_FAILED + 1))
+	return 0
+}
+
+# GH#18644: extracted from setup_test_env so the latter stays under the
+# 100-line function complexity gate. The stub handles `gh pr list` (by
+# repo/state/search key) and `gh pr view` (by PR number + json field).
+_write_gh_stub() {
+	local stub_path="$1"
+	cat >"$stub_path" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# gh pr list — returns fixture JSON for (repo, state, search) lookup.
+if [[ "${1:-}" == "pr" && "${2:-}" == "list" ]]; then
+	local_repo=""
+	local_state=""
+	local_search=""
+	shift 2
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--repo) local_repo="${2:-}"; shift 2 ;;
+		--state) local_state="${2:-}"; shift 2 ;;
+		--search) local_search="${2:-}"; shift 2 ;;
+		*) shift ;;
+		esac
+	done
+	if [[ -z "$local_repo" || -z "$local_state" || -z "$local_search" ]]; then
+		printf '[]\n'
+		exit 0
+	fi
+	compound_key="${local_repo}|${local_state}|${local_search}"
+	while IFS= read -r line; do
+		[[ -n "$line" ]] || continue
+		fixture_key="${line%|*}"
+		fixture_payload="${line##*|}"
+		if [[ "$fixture_key" == "$compound_key" ]]; then
+			printf '%s\n' "$fixture_payload"
+			exit 0
+		fi
+	done <"${GH_FIXTURE_FILE}"
+	printf '[]\n'
+	exit 0
+fi
+
+# gh pr view <number> --repo R --json body|title --jq '.body|.title'
+# Fixture line format: "<pr_number>|<field>|<payload>". Payload may
+# contain '|' — we split on the first two delimiters only.
+if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
+	pr_num="${3:-}"
+	field=""
+	shift 3 2>/dev/null || true
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--json) field="${2:-}"; shift 2 ;;
+		--jq) shift 2 ;;
+		--repo) shift 2 ;;
+		*) shift ;;
+		esac
+	done
+	[[ -z "$pr_num" || -z "$field" ]] && exit 1
+	if [[ -f "${GH_PR_VIEW_FIXTURE_FILE}" ]]; then
+		while IFS= read -r line; do
+			[[ -n "$line" ]] || continue
+			fixture_pr="${line%%|*}"
+			rest="${line#*|}"
+			fixture_field="${rest%%|*}"
+			fixture_payload="${rest#*|}"
+			if [[ "$fixture_pr" == "$pr_num" && "$fixture_field" == "$field" ]]; then
+				printf '%s\n' "$fixture_payload"
+				exit 0
+			fi
+		done <"${GH_PR_VIEW_FIXTURE_FILE}"
+	fi
+	printf '\n'
+	exit 0
+fi
+
+printf 'unsupported gh invocation in test stub: %s\n' "$*" >&2
+exit 1
+EOF
+	chmod +x "$stub_path"
+	return 0
+}
+
+setup_test_env() {
+	TEST_ROOT=$(mktemp -d)
+	GH_FIXTURE_FILE="${TEST_ROOT}/gh-pr-list-fixtures.txt"
+	GH_PR_VIEW_FIXTURE_FILE="${TEST_ROOT}/gh-pr-view-fixtures.txt"
+
+	mkdir -p "${TEST_ROOT}/bin"
+	export PATH="${TEST_ROOT}/bin:${PATH}"
+	export GH_FIXTURE_FILE
+	export GH_PR_VIEW_FIXTURE_FILE
+
+	_write_gh_stub "${TEST_ROOT}/bin/gh"
+
+	printf '' >"${GH_FIXTURE_FILE}"
+	printf '' >"${GH_PR_VIEW_FIXTURE_FILE}"
+	return 0
+}
+
+teardown_test_env() {
+	if [[ -n "$TEST_ROOT" && -d "$TEST_ROOT" ]]; then
+		rm -rf "$TEST_ROOT"
+	fi
+	return 0
+}
+
+set_gh_fixtures() {
+	local fixtures="$1"
+	printf '%s\n' "$fixtures" >"${GH_FIXTURE_FILE}"
+	return 0
+}
+
+set_gh_pr_view_fixtures() {
+	local fixtures="$1"
+	printf '%s\n' "$fixtures" >"${GH_PR_VIEW_FIXTURE_FILE}"
+	return 0
+}
+
+test_has_open_pr_detects_closing_keyword() {
+	# Check 2 (body search): fetch up to 20 PRs with "#N in:body" and
+	# filter locally. Body is included in the pr list JSON; no gh pr view call.
+	set_gh_fixtures 'Aditya060806/Maestro|merged|#4527 in:body|[{"number":1145,"body":"Closes #4527. Implements the fix."}]'
+
+	local output=""
+	if output=$("$HELPER_SCRIPT" has-open-pr 4527 Aditya060806/Maestro 't4527: prevent duplicate dispatch'); then
+		case "$output" in
+		*'merged PR #1145 references issue #4527 via keyword'*)
+			print_result "has-open-pr detects merged PR via closing keyword" 0
+			return 0
+			;;
+		esac
+		print_result "has-open-pr detects merged PR via closing keyword" 1 "Unexpected output: ${output}"
+		return 0
+	fi
+
+	print_result "has-open-pr detects merged PR via closing keyword" 1 "Expected merged PR evidence for issue #4527"
+	return 0
+}
+
+test_has_open_pr_detects_task_id_fallback() {
+	# Check 3 (task-id title match) now requires the merged PR body to
+	# contain a closing-keyword reference to our specific issue number.
+	# Bare "#NNN" body references are no longer sufficient (GH#18641).
+	# Body must be included in the pr list JSON (no separate gh pr view call).
+	set_gh_fixtures 'Aditya060806/Maestro|merged|t063.1 in:title|[{"number":1059,"body":"Closes #9999. The webapp duplicate-dispatch guard."}]'
+
+	local output=""
+	if output=$("$HELPER_SCRIPT" has-open-pr 9999 Aditya060806/Maestro 't063.1: fix webapp duplicate PR dispatch'); then
+		case "$output" in
+		*'merged PR #1059 found by task id t063.1 in title'*)
+			print_result "has-open-pr detects merged PR via task-id fallback" 0
+			return 0
+			;;
+		esac
+		print_result "has-open-pr detects merged PR via task-id fallback" 1 "Unexpected output: ${output}"
+		return 0
+	fi
+
+	print_result "has-open-pr detects merged PR via task-id fallback" 1 "Expected merged PR evidence via task-id fallback"
+	return 0
+}
+
+test_has_open_pr_returns_nonzero_without_match() {
+	set_gh_fixtures ''
+	set_gh_pr_view_fixtures ''
+
+	if "$HELPER_SCRIPT" has-open-pr 7777 Aditya060806/Maestro 't7777: no merged pr yet'; then
+		print_result "has-open-pr returns nonzero when no evidence exists" 1 "Expected nonzero exit when no merged PR evidence exists"
+		return 0
+	fi
+
+	print_result "has-open-pr returns nonzero when no evidence exists" 0
+	return 0
+}
+
+# GH#18641: planning-only PR bodies use `For #NNN` instead of `Closes #NNN`
+# so the brief PR does NOT auto-close the real implementation issue. Check 3
+# must NOT treat `For #NNN` as dispatch-blocking evidence, otherwise every
+# brief PR permanently blocks dispatch on its own follow-up issue.
+test_has_open_pr_ignores_planning_for_reference() {
+	# Body is included in the pr list JSON (no separate gh pr view call).
+	set_gh_fixtures 'Aditya060806/Maestro|merged|t2047 in:title|[{"number":18627,"body":"Files the brief for **t2047**. Pure planning, no code changes.\n\nFor #18624\nFor #18599"}]'
+
+	if "$HELPER_SCRIPT" has-open-pr 18624 Aditya060806/Maestro 't2047: task-id collision guard'; then
+		print_result "has-open-pr ignores planning-only 'For #NNN' reference" 1 \
+			"Expected exit 1: brief PR with 'For #18624' must not block dispatch"
+		return 0
+	fi
+
+	print_result "has-open-pr ignores planning-only 'For #NNN' reference" 0
+	return 0
+}
+
+# GH#18641: same convention with `Ref #NNN` phrasing must also be ignored.
+test_has_open_pr_ignores_planning_ref_reference() {
+	# Body is included in the pr list JSON (no separate gh pr view call).
+	set_gh_fixtures 'Aditya060806/Maestro|merged|t2038 in:title|[{"number":18524,"body":"Research brief for t2038.\n\nRef #18521\nRef #18522"}]'
+
+	if "$HELPER_SCRIPT" has-open-pr 18522 Aditya060806/Maestro 't2038: research branch protection bypass'; then
+		print_result "has-open-pr ignores planning-only 'Ref #NNN' reference" 1 \
+			"Expected exit 1: research brief with 'Ref #18522' must not block dispatch"
+		return 0
+	fi
+
+	print_result "has-open-pr ignores planning-only 'Ref #NNN' reference" 0
+	return 0
+}
+
+# GH#18641: a PR whose body contains BOTH a closing keyword for a different
+# issue AND a planning reference for ours must still NOT block dispatch on
+# ours — the closing keyword must match OUR issue number specifically.
+test_has_open_pr_requires_close_keyword_for_our_issue() {
+	# Body is included in the pr list JSON (no separate gh pr view call).
+	set_gh_fixtures 'Aditya060806/Maestro|merged|t2037 in:title|[{"number":18524,"body":"Files briefs.\n\nCloses #18521\nFor #18522"}]'
+
+	if "$HELPER_SCRIPT" has-open-pr 18522 Aditya060806/Maestro 't2037: inline gate refactor'; then
+		print_result "has-open-pr requires close keyword for OUR issue, not another" 1 \
+			"Expected exit 1: 'Closes #18521' closes a different issue; 'For #18522' is planning-only for ours"
+		return 0
+	fi
+
+	print_result "has-open-pr requires close keyword for OUR issue, not another" 0
+	return 0
+}
+
+# t2085: Layer 4 dedup must detect OPEN PRs that put `Resolves #N` in the
+# PR body (the framework convention via full-loop-helper.sh commit-and-pr).
+# Without this check, the dedup helper is blind to every routine
+# implementation PR — Check 1 matches commit subjects + PR title, neither
+# of which carries the closing keyword under the framework convention.
+# Trigger incident: cross-runner race on issue #18779 → PR #18906.
+test_has_open_pr_detects_open_body_closing_keyword() {
+	# Check 1b: "#N in:body" search with body in the pr list JSON.
+	# No separate gh pr view call; jq filters locally with the closing regex.
+	set_gh_fixtures 'Aditya060806/Maestro|open|#18779 in:body|[{"number":18906,"body":"Resolves #18779. Decompose four interconnected opencode plugin files."}]'
+
+	local output=""
+	if output=$("$HELPER_SCRIPT" has-open-pr 18779 Aditya060806/Maestro 't2071: decompose opencode plugin cluster'); then
+		case "$output" in
+		*'open PR #18906 closes issue #18779 via keyword in body'*)
+			print_result "has-open-pr detects OPEN PR via body closing keyword (t2085)" 0
+			return 0
+			;;
+		esac
+		print_result "has-open-pr detects OPEN PR via body closing keyword (t2085)" 1 "Unexpected output: ${output}"
+		return 0
+	fi
+
+	print_result "has-open-pr detects OPEN PR via body closing keyword (t2085)" 1 "Expected open PR evidence for issue #18779"
+	return 0
+}
+
+# t2085: planning-only OPEN PR bodies use `For #N` / `Ref #N` instead of a
+# closing keyword. The new open-body check must NOT treat those as evidence,
+# matching the existing planning-aware semantics already enforced by
+# Check 3 for merged PRs (GH#18641).
+test_has_open_pr_ignores_open_body_planning_for_reference() {
+	# No keyword-search hits at all — the brief PR body uses "For #18779" not
+	# any closing keyword, so the gh search-by-keyword stage finds nothing.
+	# Verify that none of the keyword variants produce a positive match.
+	set_gh_fixtures ''
+	set_gh_pr_view_fixtures ''
+
+	if "$HELPER_SCRIPT" has-open-pr 18779 Aditya060806/Maestro 't2071: planning brief'; then
+		print_result "has-open-pr ignores OPEN PR with planning-only 'For #N' (t2085)" 1 \
+			"Expected exit 1: a brief PR with only 'For #18779' must not block dispatch"
+		return 0
+	fi
+
+	print_result "has-open-pr ignores OPEN PR with planning-only 'For #N' (t2085)" 0
+	return 0
+}
+
+# t2085: a PR whose body contains a closing keyword for a DIFFERENT issue
+# but mentions our issue without a closing keyword must NOT block dispatch
+# on our issue. The post-filter regex must match OUR issue number
+# specifically. (Mirrors GH#18641 semantics for the open-state code path.)
+test_has_open_pr_requires_open_close_keyword_for_our_issue() {
+	# GitHub full-text search may return a PR that mentions #18779 in context
+	# but closes a different issue. The fixture simulates this: body contains
+	# "Closes #18999" and references #18779 in passing. The jq post-filter
+	# must reject it because no closing keyword targets #18779 specifically.
+	set_gh_fixtures 'Aditya060806/Maestro|open|#18779 in:body|[{"number":18950,"body":"Closes #18999. This PR is unrelated to #18779; the search just full-text matched."}]'
+
+	if "$HELPER_SCRIPT" has-open-pr 18779 Aditya060806/Maestro 't2071: opencode decomposition'; then
+		print_result "has-open-pr requires open-PR close keyword for OUR issue (t2085)" 1 \
+			"Expected exit 1: PR closes #18999, not #18779; full-text search hit must be filtered"
+		return 0
+	fi
+
+	print_result "has-open-pr requires open-PR close keyword for OUR issue (t2085)" 0
+	return 0
+}
+
+test_has_open_pr_blocks_approved_mergeable_sibling() {
+	# Check 0: a ready sibling PR may reference the issue with `For #N`
+	# instead of a closing keyword (common for parent/phase work). When it is
+	# approved and mergeable, redispatch would only create a duplicate worker.
+	set_gh_fixtures 'Aditya060806/Maestro|open|#23250|[{"number":23288,"title":"Implement dispatch dedup sibling guard","body":"For #23250. Adds the worker redispatch guard.","isDraft":false,"reviewDecision":"APPROVED","mergeStateStatus":"CLEAN"}]'
+
+	local output=""
+	if output=$("$HELPER_SCRIPT" has-open-pr 23250 Aditya060806/Maestro 't3500: dispatch sibling dedup'); then
+		case "$output" in
+		*'open PR #23288 is approved or mergeable for issue #23250'*)
+			print_result "has-open-pr blocks approved mergeable sibling PR" 0
+			return 0
+			;;
+		esac
+		print_result "has-open-pr blocks approved mergeable sibling PR" 1 "Unexpected output: ${output}"
+		return 0
+	fi
+
+	print_result "has-open-pr blocks approved mergeable sibling PR" 1 "Expected approved/mergeable sibling PR to block redispatch"
+	return 0
+}
+
+test_has_open_pr_blocks_approved_sibling_without_merge_state() {
+	# Approved siblings can briefly have UNKNOWN merge state while GitHub computes
+	# mergeability. They should still suppress redispatch unless explicitly
+	# blocked/conflicting, because an approved sibling is already in the merge path.
+	set_gh_fixtures 'Aditya060806/Maestro|open|#23255|[{"number":23295,"title":"Approved sibling","body":"For #23255. Adds the worker redispatch guard.","isDraft":false,"reviewDecision":"APPROVED","mergeStateStatus":"UNKNOWN"}]'
+
+	local output=""
+	if output=$("$HELPER_SCRIPT" has-open-pr 23255 Aditya060806/Maestro 't3505: approved sibling dedup'); then
+		case "$output" in
+		*'open PR #23295 is approved or mergeable for issue #23255'*)
+			print_result "has-open-pr blocks approved sibling while merge state computes" 0
+			return 0
+			;;
+		esac
+		print_result "has-open-pr blocks approved sibling while merge state computes" 1 "Unexpected output: ${output}"
+		return 0
+	fi
+
+	print_result "has-open-pr blocks approved sibling while merge state computes" 1 "Expected approved sibling PR to block redispatch"
+	return 0
+}
+
+test_has_open_pr_blocks_mergeable_sibling_without_approval() {
+	# A clean/mergeable sibling is already healthy enough for normal review/merge
+	# progression. Dispatching another worker would race the in-flight PR.
+	set_gh_fixtures 'Aditya060806/Maestro|open|#23256|[{"number":23296,"title":"Mergeable sibling","body":"For #23256. Adds the worker redispatch guard.","isDraft":false,"reviewDecision":"REVIEW_REQUIRED","mergeStateStatus":"CLEAN","mergeable":"MERGEABLE"}]'
+
+	local output=""
+	if output=$("$HELPER_SCRIPT" has-open-pr 23256 Aditya060806/Maestro 't3506: mergeable sibling dedup'); then
+		case "$output" in
+		*'open PR #23296 is approved or mergeable for issue #23256'*)
+			print_result "has-open-pr blocks mergeable sibling without approval" 0
+			return 0
+			;;
+		esac
+		print_result "has-open-pr blocks mergeable sibling without approval" 1 "Unexpected output: ${output}"
+		return 0
+	fi
+
+	print_result "has-open-pr blocks mergeable sibling without approval" 1 "Expected mergeable sibling PR to block redispatch"
+	return 0
+}
+
+test_has_open_pr_blocks_refs_colon_healthy_sibling() {
+	# Check 0 supports common reference variants used by PR bodies, including
+	# plural `Refs` and colon punctuation after the keyword.
+	set_gh_fixtures 'Aditya060806/Maestro|open|#23252|[{"number":23292,"title":"Implement dispatch dedup refs guard","body":"Refs: #23252. Adds the worker redispatch guard.","isDraft":false,"reviewDecision":"APPROVED","mergeStateStatus":"CLEAN"}]'
+
+	local output=""
+	if output=$("$HELPER_SCRIPT" has-open-pr 23252 Aditya060806/Maestro 't3502: dispatch sibling refs dedup'); then
+		case "$output" in
+		*'open PR #23292 is approved or mergeable for issue #23252'*)
+			print_result "has-open-pr blocks approved sibling using Refs: #N" 0
+			return 0
+			;;
+		esac
+		print_result "has-open-pr blocks approved sibling using Refs: #N" 1 "Unexpected output: ${output}"
+		return 0
+	fi
+
+	print_result "has-open-pr blocks approved sibling using Refs: #N" 1 "Expected approved sibling with Refs: #23252 to block redispatch"
+	return 0
+}
+
+test_has_open_pr_blocks_behind_healthy_sibling() {
+	# BEHIND PRs are still valid siblings that the merge path can rebase; they
+	# should block duplicate redispatch when already approved and non-draft.
+	set_gh_fixtures 'Aditya060806/Maestro|open|#23253|[{"number":23293,"title":"Implement dispatch dedup behind guard","body":"Ref #23253. Adds the worker redispatch guard.","isDraft":false,"reviewDecision":"APPROVED","mergeStateStatus":"BEHIND"}]'
+
+	local output=""
+	if output=$("$HELPER_SCRIPT" has-open-pr 23253 Aditya060806/Maestro 't3503: dispatch sibling behind dedup'); then
+		case "$output" in
+		*'open PR #23293 is approved or mergeable for issue #23253'*)
+			print_result "has-open-pr blocks approved BEHIND sibling PR" 0
+			return 0
+			;;
+		esac
+		print_result "has-open-pr blocks approved BEHIND sibling PR" 1 "Unexpected output: ${output}"
+		return 0
+	fi
+
+	print_result "has-open-pr blocks approved BEHIND sibling PR" 1 "Expected approved BEHIND sibling PR to block redispatch"
+	return 0
+}
+
+test_has_open_pr_allows_when_no_healthy_sibling() {
+	# Blocked siblings (draft, changes-requested, conflicting, or unknown without
+	# approval) must not hold the issue forever. They are not candidates the merge
+	# path can finish safely, so redispatch remains allowed when no other PR
+	# evidence exists.
+	set_gh_fixtures 'Aditya060806/Maestro|open|#23251|[{"number":23289,"title":"Draft sibling","body":"For #23251.","isDraft":true,"reviewDecision":"APPROVED","mergeStateStatus":"CLEAN"},{"number":23290,"title":"Needs changes","body":"For #23251.","isDraft":false,"reviewDecision":"CHANGES_REQUESTED","mergeStateStatus":"CLEAN"},{"number":23291,"title":"Conflicting sibling","body":"For #23251.","isDraft":false,"reviewDecision":"APPROVED","mergeStateStatus":"DIRTY"},{"number":23297,"title":"Unknown sibling","body":"For #23251.","isDraft":false,"reviewDecision":"REVIEW_REQUIRED","mergeStateStatus":"UNKNOWN"}]'
+
+	if "$HELPER_SCRIPT" has-open-pr 23251 Aditya060806/Maestro 't3501: allow unhealthy sibling recovery'; then
+		print_result "has-open-pr allows dispatch when no healthy sibling exists" 1 \
+			"Expected exit 1: draft/changes-requested/conflicting/unknown siblings must not block redispatch"
+		return 0
+	fi
+
+	print_result "has-open-pr allows dispatch when no healthy sibling exists" 0
+	return 0
+}
+
+test_has_open_pr_ignores_embedded_bare_sibling_reference() {
+	# Check 0 must require a leading boundary for every issue-reference
+	# alternative, including bare GH#N/#N forms. Without that boundary, an
+	# approved sibling whose title or body embeds "#23254" inside another token
+	# would incorrectly block redispatch.
+	set_gh_fixtures 'Aditya060806/Maestro|open|#23254|[{"number":23294,"title":"Release v1.0#23254 metadata","body":"Changelog token build#23254 only; no issue reference.","isDraft":false,"reviewDecision":"APPROVED","mergeStateStatus":"CLEAN"}]'
+
+	if "$HELPER_SCRIPT" has-open-pr 23254 Aditya060806/Maestro 't3504: embedded sibling ref guard'; then
+		print_result "has-open-pr ignores embedded bare sibling reference" 1 \
+			"Expected exit 1: embedded #23254 must not block redispatch without a leading boundary"
+		return 0
+	fi
+
+	print_result "has-open-pr ignores embedded bare sibling reference" 0
+	return 0
+}
+
+test_has_open_pr_ignores_adjacent_issue_number_sibling_reference() {
+	# GitHub full-text search can return adjacent issue numbers. Check 0 must
+	# require a trailing boundary so a healthy PR for #232541 does not block
+	# redispatch for issue #23254.
+	set_gh_fixtures 'Aditya060806/Maestro|open|#23254|[{"number":23298,"title":"Implement unrelated issue #232541","body":"For #232541. Adds unrelated worker changes.","isDraft":false,"reviewDecision":"APPROVED","mergeStateStatus":"CLEAN"}]'
+
+	if "$HELPER_SCRIPT" has-open-pr 23254 Aditya060806/Maestro 't3504: adjacent sibling ref guard'; then
+		print_result "has-open-pr ignores adjacent issue-number sibling reference" 1 \
+			"Expected exit 1: #232541 must not block redispatch for #23254"
+		return 0
+	fi
+
+	print_result "has-open-pr ignores adjacent issue-number sibling reference" 0
+	return 0
+}
+
+# Existing collision case (GH#18041 / t1957) must still allow dispatch:
+# different task used the same ID, merged PR closes some unrelated issue.
+test_has_open_pr_allows_dispatch_on_task_id_collision() {
+	# Body is included in the pr list JSON (no separate gh pr view call).
+	set_gh_fixtures 'Aditya060806/Maestro|merged|t500 in:title|[{"number":1200,"body":"Closes #555. Unrelated work that reused task ID t500."}]'
+
+	if "$HELPER_SCRIPT" has-open-pr 9999 Aditya060806/Maestro 't500: different work for issue #9999'; then
+		print_result "has-open-pr allows dispatch on task-id collision" 1 \
+			"Expected exit 1: merged PR closes a different issue via task-id collision"
+		return 0
+	fi
+
+	print_result "has-open-pr allows dispatch on task-id collision" 0
+	return 0
+}
+
+test_has_open_pr_blocks_superseded_consolidated_issue() {
+	set_gh_fixtures 'Aditya060806/Maestro|merged|#26241|[{"number":26266,"title":"For #26241: split mixed PR view fields","body":"## Summary\n\n- Split mixed gh_pr_view requests into REST and GraphQL subsets.\n\nFor #26241\n\n## Testing\n\n- .agents/scripts/tests/test-gh-wrapper-rest-fallback.sh"}]'
+	export ISSUE_META_JSON='{"body":"_Supersedes #26241 — this issue is the consolidated spec._\n\nImplement the remaining mixed REST/GQL field-split phase."}'
+
+	local output=""
+	if output=$("$HELPER_SCRIPT" has-open-pr 26274 Aditya060806/Maestro 'consolidated: split mixed gh_pr_view REST/GQL fields'); then
+		unset ISSUE_META_JSON
+		case "$output" in
+		*'merged PR #26266 references superseded issue #26241 for consolidated issue #26274'*)
+			print_result "has-open-pr blocks superseded consolidated issue satisfied by merged PR" 0
+			return 0
+			;;
+		esac
+		print_result "has-open-pr blocks superseded consolidated issue satisfied by merged PR" 1 "Unexpected output: ${output}"
+		return 0
+	fi
+
+	unset ISSUE_META_JSON
+	print_result "has-open-pr blocks superseded consolidated issue satisfied by merged PR" 1 \
+		"Expected merged PR evidence via superseded issue reference"
+	return 0
+}
+
+test_has_open_pr_ignores_planning_only_superseded_reference() {
+	set_gh_fixtures 'Aditya060806/Maestro|merged|#26241|[{"number":26260,"title":"For #26241: planning brief","body":"Files the brief for the follow-up. Pure planning, no code changes.\n\nFor #26241"}]'
+	export ISSUE_META_JSON='{"body":"_Supersedes #26241 — this issue is the consolidated spec._"}'
+
+	if "$HELPER_SCRIPT" has-open-pr 26274 Aditya060806/Maestro 'consolidated: split mixed gh_pr_view REST/GQL fields'; then
+		unset ISSUE_META_JSON
+		print_result "has-open-pr ignores planning-only superseded references" 1 \
+			"Expected planning-only merged PR to allow dispatch"
+		return 0
+	fi
+
+	unset ISSUE_META_JSON
+	print_result "has-open-pr ignores planning-only superseded references" 0
+	return 0
+}
+
+main() {
+	trap teardown_test_env EXIT
+	setup_test_env
+
+	test_has_open_pr_detects_closing_keyword
+	test_has_open_pr_detects_task_id_fallback
+	test_has_open_pr_returns_nonzero_without_match
+	test_has_open_pr_ignores_planning_for_reference
+	test_has_open_pr_ignores_planning_ref_reference
+	test_has_open_pr_requires_close_keyword_for_our_issue
+	test_has_open_pr_allows_dispatch_on_task_id_collision
+	test_has_open_pr_detects_open_body_closing_keyword
+	test_has_open_pr_ignores_open_body_planning_for_reference
+	test_has_open_pr_requires_open_close_keyword_for_our_issue
+	test_has_open_pr_blocks_approved_mergeable_sibling
+	test_has_open_pr_blocks_approved_sibling_without_merge_state
+	test_has_open_pr_blocks_mergeable_sibling_without_approval
+	test_has_open_pr_blocks_refs_colon_healthy_sibling
+	test_has_open_pr_blocks_behind_healthy_sibling
+	test_has_open_pr_allows_when_no_healthy_sibling
+	test_has_open_pr_ignores_embedded_bare_sibling_reference
+	test_has_open_pr_ignores_adjacent_issue_number_sibling_reference
+	test_has_open_pr_blocks_superseded_consolidated_issue
+	test_has_open_pr_ignores_planning_only_superseded_reference
+
+	printf '\nRan %s tests, %s failed.\n' "$TESTS_RUN" "$TESTS_FAILED"
+	if [[ "$TESTS_FAILED" -gt 0 ]]; then
+		return 1
+	fi
+	return 0
+}
+
+main "$@"

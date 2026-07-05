@@ -1,0 +1,49 @@
+---
+description: Probing questions for feature tasks — surfaces latent requirements before implementation
+mode: subagent
+---
+
+<!-- SPDX-License-Identifier: MIT -->
+<!-- SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest -->
+
+# Feature Probes
+
+Use 2 probes from this file during `/define` for tasks classified as **feature**.
+
+**Defaults** (apply unless overridden): minimal footprint, follow existing patterns, include tests for new behaviour, no breaking API changes.
+
+## Sufficiency Test
+
+Before generating the brief, verify you can answer all four:
+
+- What does the user see/experience when done?
+- What existing code does this touch?
+- What would a code reviewer reject?
+- What's the one edge case most likely missed?
+
+If any answer is "I don't know" — ask one more targeted question.
+
+## Required Questions
+
+**Scope & Integration** — Where does this feature live in the user's workflow?
+Options: Standalone menu/command/button (recommended) · Inline in existing flow · Background automatic · Describe integration point
+
+**Data & State** — Does this feature need to persist state?
+Options: No — stateless, computed on demand (recommended) · Yes — local storage/file system · Yes — database/API · Not sure yet
+
+## Probes (select 2)
+
+**Pre-mortem** — Feature ships, user reports a problem in week one. Most likely complaint?
+Options: Inferred from description (recommended) · Performance too slow for large inputs · UI confusing or hard to discover · Conflicts with existing feature
+
+**Backcasting** — Working backwards from "done", what's the last thing you'd verify?
+Options: End-to-end test passes with realistic data (recommended) · Documentation updated · Existing features still work · Specify
+
+**Domain Grounding** — Similar features follow [detected pattern]. Should this feature:
+Options: Follow the same pattern (recommended — consistency) · Diverge — explain why · Not sure — show me the pattern
+
+**Negative Space** — What makes a technically correct implementation unacceptable?
+Options: Too slow (>Xs response time) · Requires migration or breaking change · Adds significant bundle size/dependencies · Nothing — correctness is sufficient
+
+**Outside View** — Features of this scope typically take [estimated time]. Match your expectation?
+Options: Yes — about right · No — should be simpler (~Xh) · No — more complex (~Xh) · No estimate yet

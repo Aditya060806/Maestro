@@ -1,0 +1,19 @@
+{
+  "name": "maestro",
+  "owner": {
+    "name": "Aditya Pandey and Harvest",
+    "email": "Aditya060806@users.noreply.github.com"
+  },
+  "metadata": {
+    "description": "Maestro Framework - comprehensive DevOps automation with 25+ service integrations",
+    "version": "3.31.53"
+  },
+  "plugins": [
+    {
+      "name": "maestro",
+      "source": "./.agents",
+      "description": "Complete Maestro framework - 14 domain agents, 80+ subagents, 100+ helper scripts for WordPress, SEO, hosting, code quality, browser automation, and more",
+      "strict": false
+    }
+  ]
+}

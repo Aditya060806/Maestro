@@ -1,0 +1,12 @@
+{
+  "name": "@maestro/gui-shared",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test tests"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

@@ -1,0 +1,507 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maestro.sh/config.json",
+  "title": "maestro Configuration",
+  "description": "Configuration schema for the maestro framework. Supports JSONC (JSON with Comments).",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference for editor autocomplete and validation."
+    },
+
+    "updates": {
+      "type": "object",
+      "description": "Auto-update behaviour for maestro, skills, tools, and OpenClaw.",
+      "properties": {
+        "auto_update": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically check for and install maestro updates. Env: MAESTRO_AUTO_UPDATE"
+        },
+        "update_interval_minutes": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 1,
+          "description": "Minutes between update checks. Env: MAESTRO_UPDATE_INTERVAL"
+        },
+        "skill_auto_update": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically check imported skills for upstream changes. Env: MAESTRO_SKILL_AUTO_UPDATE"
+        },
+        "skill_freshness_hours": {
+          "type": "integer",
+          "default": 24,
+          "minimum": 1,
+          "description": "Hours between skill freshness checks. Env: MAESTRO_SKILL_FRESHNESS_HOURS"
+        },
+        "tool_auto_update": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically update installed tools when user is idle. Env: MAESTRO_TOOL_AUTO_UPDATE"
+        },
+        "tool_freshness_hours": {
+          "type": "integer",
+          "default": 6,
+          "minimum": 1,
+          "description": "Hours between tool freshness checks. Env: MAESTRO_TOOL_FRESHNESS_HOURS"
+        },
+        "tool_idle_hours": {
+          "type": "integer",
+          "default": 6,
+          "minimum": 1,
+          "description": "Required user idle hours before tool updates run. Env: MAESTRO_TOOL_IDLE_HOURS"
+        },
+        "openclaw_auto_update": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically check for OpenClaw updates. Env: MAESTRO_OPENCLAW_AUTO_UPDATE"
+        },
+        "openclaw_freshness_hours": {
+          "type": "integer",
+          "default": 24,
+          "minimum": 1,
+          "description": "Hours between OpenClaw update checks. Env: MAESTRO_OPENCLAW_FRESHNESS_HOURS"
+        },
+        "upstream_watch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically check upstream repos for new releases. Env: MAESTRO_UPSTREAM_WATCH"
+        },
+        "upstream_watch_hours": {
+          "type": "integer",
+          "default": 24,
+          "minimum": 1,
+          "description": "Hours between upstream repo watch checks. Env: MAESTRO_UPSTREAM_WATCH_HOURS"
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "integrations": {
+      "type": "object",
+      "description": "AI assistant and external tool integration management.",
+      "properties": {
+        "manage_opencode_config": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow setup.sh to modify OpenCode config."
+        },
+        "manage_claude_config": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow setup.sh to modify Claude Code config."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "orchestration": {
+      "type": "object",
+      "description": "Supervisor, dispatch, and autonomous operation settings.",
+      "properties": {
+        "supervisor_pulse": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the autonomous supervisor pulse scheduler. Env: MAESTRO_SUPERVISOR_PULSE"
+        },
+        "interactive_pr_auto_merge": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow pulse to merge maintainer-authored origin:interactive PRs after normal gates pass. Env: MAESTRO_INTERACTIVE_PR_AUTO_MERGE"
+        },
+        "pulse_interval_seconds": {
+          "type": "integer",
+          "default": 180,
+          "minimum": 30,
+          "maximum": 3600,
+          "description": "Seconds between pulse cycles. Canonical key (t2946). Legacy: supervisor.pulse_interval_seconds (still honoured for one release)."
+        },
+        "repo_sync": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable daily git pull --ff-only on clean repos. Env: MAESTRO_REPO_SYNC"
+        },
+        "max_workers_cap": {
+          "type": "integer",
+          "default": 8,
+          "minimum": 1,
+          "description": "Hard ceiling for pulse worker pool size after RAM-based calculation. Env: MAESTRO_MAX_WORKERS_CAP"
+        },
+        "min_worker_concurrency": {
+          "type": "integer",
+          "default": 6,
+          "minimum": 0,
+          "description": "Minimum active implementation-worker floor while provider/account health and host load permit. Set to 0 to disable. Env: MAESTRO_MIN_WORKER_CONCURRENCY"
+        },
+        "quality_debt_cap_pct": {
+          "type": "integer",
+          "default": 30,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Maximum share of worker slots quality-debt issues may consume. Env: MAESTRO_QUALITY_DEBT_CAP_PCT"
+        },
+        "provider_account_slot_multiplier": {
+          "type": "integer",
+          "default": 24,
+          "minimum": 1,
+          "description": "Worker slots allowed per available provider OAuth account. Default 24 lets one healthy account reach the configured max worker cap unless RAM, load, provider health, rate limits, auth errors, or explicit overrides reduce capacity. Env: PULSE_PROVIDER_ACCOUNT_SLOT_MULTIPLIER"
+        },
+        "pulse_model": {
+          "type": "string",
+          "default": "",
+          "deprecated": true,
+          "description": "DEPRECATED (v3.7+, GH#17769): Model routing is now derived from pool + routing table. This field is ignored. Remove from config."
+        },
+        "headless_models": {
+          "type": "string",
+          "default": "",
+          "deprecated": true,
+          "description": "DEPRECATED (v3.7+, GH#17769): Model routing is now derived from pool + routing table. This field is ignored. Remove from config."
+        },
+        "peak_hours_enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Cap MAX_WORKERS during peak hours to reduce session-limit pressure. Disabled by default. Env: MAESTRO_PEAK_HOURS_ENABLED"
+        },
+        "peak_hours_start": {
+          "type": "integer",
+          "default": 5,
+          "minimum": 0,
+          "maximum": 23,
+          "description": "Start hour of the peak window (0-23, local time). Default 5 = 5 AM. Env: MAESTRO_PEAK_HOURS_START"
+        },
+        "peak_hours_end": {
+          "type": "integer",
+          "default": 11,
+          "minimum": 0,
+          "maximum": 23,
+          "description": "End hour of the peak window (0-23, local time, exclusive). Overnight windows supported (start > end). Env: MAESTRO_PEAK_HOURS_END"
+        },
+        "peak_hours_tz": {
+          "type": "string",
+          "default": "America/Los_Angeles",
+          "description": "Timezone label for documentation. Pulse uses system local time (date +%H). Env: MAESTRO_PEAK_HOURS_TZ"
+        },
+        "peak_hours_worker_fraction": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0.01,
+          "maximum": 1.0,
+          "description": "Fraction of off-peak MAX_WORKERS allowed during peak hours (0.2 = 20%). Result is rounded up, minimum 1. Env: MAESTRO_PEAK_HOURS_WORKER_FRACTION"
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "safety": {
+      "type": "object",
+      "description": "Security hooks, verification, and protective measures.",
+      "properties": {
+        "hooks_enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Install git pre-commit and pre-push safety hooks."
+        },
+        "verification_enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable parallel model verification for high-stakes operations."
+        },
+        "verification_tier": {
+          "type": "string",
+          "default": "haiku",
+          "enum": ["haiku", "flash", "sonnet", "pro", "opus"],
+          "description": "Model tier used for verification checks."
+        },
+        "max_interactive_sessions": {
+          "type": "integer",
+          "default": 5,
+          "minimum": 0,
+          "description": "Maximum concurrent interactive AI sessions before warning. 0 disables. Env: MAESTRO_MAX_SESSIONS"
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ui": {
+      "type": "object",
+      "description": "User interface and session experience settings.",
+      "properties": {
+        "session_greeting": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show version check and update prompt when starting an AI session."
+        },
+        "shell_aliases": {
+          "type": "boolean",
+          "default": true,
+          "description": "Add maestro shell aliases to .zshrc/.bashrc during setup."
+        },
+        "onboarding_prompt": {
+          "type": "boolean",
+          "default": true,
+          "description": "Offer to launch /onboarding after setup.sh completes."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "models": {
+      "type": "object",
+      "description": "Model routing, tiers, and provider configuration.",
+      "properties": {
+        "tiers": {
+          "type": "object",
+          "description": "Model tier assignments. Each tier maps to an ordered list of models.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "models": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Ordered list of models for this tier."
+              },
+              "fallback": {
+                "type": "string",
+                "description": "Tier to fall back to if all models in this tier are unavailable."
+              }
+            },
+            "required": ["models"]
+          }
+        },
+        "providers": {
+          "type": "object",
+          "description": "Provider endpoint and authentication configuration.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "endpoint": { "type": "string", "format": "uri" },
+              "key_env": { "type": ["string", "null"] },
+              "probe_timeout_seconds": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "fallback_chains": {
+          "type": "object",
+          "description": "Per-tier fallback chains for model-level failover.",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "fallback_triggers": {
+          "type": "object",
+          "description": "Fallback trigger configuration.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "cooldown_seconds": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "settings": {
+          "type": "object",
+          "description": "General model routing settings.",
+          "properties": {
+            "probe_timeout_seconds": { "type": "integer", "default": 10 },
+            "cache_ttl_seconds": { "type": "integer", "default": 300 },
+            "max_chain_depth": { "type": "integer", "default": 5 },
+            "default_cooldown_seconds": { "type": "integer", "default": 300 },
+            "log_retention_days": { "type": "integer", "default": 30 }
+          }
+        },
+        "rate_limits": {
+          "type": "object",
+          "description": "Rate limits per provider.",
+          "properties": {
+            "warn_pct": { "type": "integer", "default": 80, "minimum": 0, "maximum": 100 },
+            "window_minutes": { "type": "integer", "default": 1, "minimum": 1 },
+            "providers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "requests_per_min": { "type": "integer", "minimum": 0 },
+                  "tokens_per_min": { "type": "integer", "minimum": 0 }
+                }
+              }
+            }
+          }
+        },
+        "gateways": {
+          "type": "object",
+          "description": "Gateway provider configuration.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "endpoint": { "type": "string" },
+              "key_env_var": { "type": "string" },
+              "account_id": { "type": "string" },
+              "gateway_id": { "type": "string" }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "quality": {
+      "type": "object",
+      "description": "Code quality, linting, and CI/CD timing configuration.",
+      "properties": {
+        "sonarcloud_grade": {
+          "type": "string",
+          "default": "A",
+          "enum": ["A", "B", "C", "D", "E"],
+          "description": "Target quality grade for SonarCloud analysis."
+        },
+        "shellcheck_max_violations": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "description": "ShellCheck violation tolerance (0 = zero tolerance)."
+        },
+        "ci_timing": {
+          "type": "object",
+          "description": "CI/CD service timing constants (seconds).",
+          "properties": {
+            "fast_wait": { "type": "integer", "default": 10 },
+            "fast_poll": { "type": "integer", "default": 5 },
+            "medium_wait": { "type": "integer", "default": 60 },
+            "medium_poll": { "type": "integer", "default": 15 },
+            "slow_wait": { "type": "integer", "default": 120 },
+            "slow_poll": { "type": "integer", "default": 30 },
+            "fast_timeout": { "type": "integer", "default": 60 },
+            "medium_timeout": { "type": "integer", "default": 180 },
+            "slow_timeout": { "type": "integer", "default": 600 },
+            "backoff_base": { "type": "integer", "default": 15 },
+            "backoff_max": { "type": "integer", "default": 120 },
+            "backoff_multiplier": { "type": "integer", "default": 2 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "verification": {
+      "type": "object",
+      "description": "High-stakes operation verification triggers.",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "default_gate": {
+          "type": "string",
+          "default": "warn",
+          "enum": ["block", "warn", "allow"]
+        },
+        "cross_provider": { "type": "boolean", "default": true },
+        "verifier_tier": { "type": "string", "default": "sonnet" },
+        "escalation_tier": { "type": "string", "default": "opus" },
+        "categories": {
+          "type": "object",
+          "description": "Per-category risk levels and gates.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "risk_level": {
+                "type": "string",
+                "enum": ["critical", "high", "medium", "low"]
+              },
+              "gate": {
+                "type": "string",
+                "enum": ["block", "warn", "allow"]
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "paths": {
+      "type": "object",
+      "description": "Directory and file path configuration. Supports ~ for home directory.",
+      "properties": {
+        "agents_dir": { "type": "string", "default": "~/.maestro/agents" },
+        "config_dir": { "type": "string", "default": "~/.config/maestro" },
+        "workspace_dir": { "type": "string", "default": "~/.maestro/.agent-workspace" },
+        "log_dir": { "type": "string", "default": "~/.maestro/logs" },
+        "memory_db": { "type": "string", "default": "~/.maestro/.agent-workspace/memory/memory.db" },
+        "worktree_registry_db": { "type": "string", "default": "~/.maestro/.agent-workspace/worktree-registry.db" }
+      },
+      "additionalProperties": false
+    },
+
+    "supervisor": {
+      "type": "object",
+      "deprecated": true,
+      "description": "DEPRECATED (t2946): Use orchestration.* instead. This namespace is still consumed for one release but will be removed. Run 'maestro update' to auto-migrate.",
+      "properties": {
+        "pulse_enabled": {
+          "type": "boolean",
+          "deprecated": true,
+          "description": "DEPRECATED: use orchestration.supervisor_pulse"
+        },
+        "pulse_interval_seconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600,
+          "deprecated": true,
+          "description": "DEPRECATED: use orchestration.pulse_interval_seconds"
+        },
+        "stale_threshold_seconds": {
+          "type": "integer",
+          "deprecated": true,
+          "description": "DEPRECATED: use orchestration settings"
+        },
+        "circuit_breaker_max_failures": {
+          "type": "integer",
+          "deprecated": true,
+          "description": "DEPRECATED: use orchestration settings"
+        },
+        "strategic_review_hours": {
+          "type": "integer",
+          "deprecated": true,
+          "description": "DEPRECATED: use orchestration settings"
+        },
+        "peak_hours_enabled": {
+          "type": "boolean",
+          "deprecated": true,
+          "description": "DEPRECATED: use orchestration.peak_hours_enabled"
+        },
+        "peak_hours_start": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23,
+          "deprecated": true,
+          "description": "DEPRECATED: use orchestration.peak_hours_start"
+        },
+        "peak_hours_end": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23,
+          "deprecated": true,
+          "description": "DEPRECATED: use orchestration.peak_hours_end"
+        },
+        "peak_hours_tz": {
+          "type": "string",
+          "deprecated": true,
+          "description": "DEPRECATED: use orchestration.peak_hours_tz"
+        },
+        "peak_hours_worker_fraction": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 1.0,
+          "deprecated": true,
+          "description": "DEPRECATED: use orchestration.peak_hours_worker_fraction"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,2677 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest
+# test-headless-runtime-helper.sh - Coverage for /full-loop headless contract injection
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
+HELPER_SCRIPT="${SCRIPT_DIR}/../headless-runtime-helper.sh"
+
+readonly TEST_RED='\033[0;31m'
+readonly TEST_GREEN='\033[0;32m'
+readonly TEST_RESET='\033[0m'
+
+TESTS_RUN=0
+TESTS_FAILED=0
+TEST_ROOT=""
+ORIGINAL_HOME="${HOME}"
+
+print_result() {
+	local test_name="$1"
+	local passed="$2"
+	local message="${3:-}"
+	TESTS_RUN=$((TESTS_RUN + 1))
+
+	if [[ "$passed" -eq 0 ]]; then
+		printf '%bPASS%b %s\n' "$TEST_GREEN" "$TEST_RESET" "$test_name"
+		return 0
+	fi
+
+	printf '%bFAIL%b %s\n' "$TEST_RED" "$TEST_RESET" "$test_name"
+	if [[ -n "$message" ]]; then
+		printf '       %s\n' "$message"
+	fi
+	TESTS_FAILED=$((TESTS_FAILED + 1))
+	return 0
+}
+
+setup_test_env() {
+	TEST_ROOT=$(mktemp -d)
+	export HOME="${TEST_ROOT}/home"
+	mkdir -p "${HOME}/.maestro/logs"
+	set +e
+	# shellcheck source=/dev/null
+	source "$HELPER_SCRIPT" >/dev/null 2>&1
+	set -e
+	return 0
+}
+
+teardown_test_env() {
+	export HOME="$ORIGINAL_HOME"
+	if [[ -n "$TEST_ROOT" && -d "$TEST_ROOT" ]]; then
+		rm -rf "$TEST_ROOT"
+	fi
+	return 0
+}
+
+init_git_worktree() {
+	local worktree_dir="$1"
+	git -C "$worktree_dir" init -q
+	git -C "$worktree_dir" remote add origin "https://github.com/owner/repo.git"
+	git -C "$worktree_dir" -c user.name="maestro-test" -c user.email="maestro-test@example.invalid" \
+		commit --allow-empty -q -m "initial"
+	git -C "$worktree_dir" update-ref refs/remotes/origin/main HEAD
+	git -C "$worktree_dir" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+	return 0
+}
+
+test_appends_escalation_contract() {
+	local prompt='/full-loop Implement issue #14964'
+	local output
+	output=$(append_worker_headless_contract "$prompt")
+
+	if [[ "$output" == *'HEADLESS_CONTINUATION_CONTRACT_V9'* ]] &&
+		[[ "$output" == *'Read the issue body FIRST'* ]] &&
+		[[ "$output" == *'Look for a "Worker Guidance" or "How" section'* ]] &&
+		[[ "$output" == *'do bounded discovery instead of stopping'* ]] &&
+		[[ "$output" == *'Exit BLOCKED with reason "missing implementation context" only after bounded discovery'* ]] &&
+		[[ "$output" == *'Worktree edit verification (GH#22816)'* ]] &&
+		[[ "$output" == *'Incremental WIP commits (GH#23677)'* ]] &&
+		[[ "$output" == *'A first WIP commit makes the worktree cleanup-visible as active real work even before a PR exists'* ]] &&
+		[[ "$output" == *'Progressive context loading'* ]] &&
+		[[ "$output" == *'Load only referenced workflow/reference docs'* ]] &&
+		[[ "$output" == *'Stop reading once target files, reference pattern, constraints, and verification are clear.'* ]] &&
+		[[ "$output" == *'Never ask for user confirmation, approval, or next steps. No user will respond.'* ]] &&
+		[[ "$output" == *'The only valid exit states are FULL_LOOP_COMPLETE or BLOCKED with evidence.'* ]]; then
+		print_result "appends escalation-before-blocked contract to full-loop prompts" 0
+		return 0
+	fi
+
+	print_result "appends escalation-before-blocked contract to full-loop prompts" 1 "Output missing required contract clauses"
+	return 0
+}
+
+test_non_full_loop_prompt_unchanged() {
+	local prompt='Review this file only'
+	local output
+	output=$(append_worker_headless_contract "$prompt")
+
+	if [[ "$output" == "$prompt" ]]; then
+		print_result "leaves non-full-loop prompt unchanged" 0
+		return 0
+	fi
+
+	print_result "leaves non-full-loop prompt unchanged" 1 "Prompt was unexpectedly modified"
+	return 0
+}
+
+test_headless_contract_uses_deployed_framework_paths() {
+	local MAESTRO_HEADLESS_APPEND_CONTRACT
+	MAESTRO_HEADLESS_APPEND_CONTRACT=1
+	local prompt
+	prompt='/full-loop Implement issue #24354'
+	local output
+	output=$(append_worker_headless_contract "$prompt")
+
+	if [[ "$output" == *'Normal project repos: full-loop workflow is deployed at ~/.maestro/agents/scripts/commands/full-loop.md'* ]] &&
+		[[ "$output" == *'Normal project repos: maestro framework scripts live under ~/.maestro/agents/scripts/ (not project-local .agents/scripts/)'* ]] &&
+		[[ "$output" == *'Maestro source repo only: the same files are edited at .agents/scripts/commands/full-loop.md and under .agents/scripts/'* ]] &&
+		[[ "$output" != *'- Full-loop workflow: .agents/scripts/commands/full-loop.md'* ]] &&
+		[[ "$output" != *'- All agent scripts live under .agents/scripts/ (not scripts/ at root)'* ]]; then
+		print_result "headless contract uses deployed framework paths for project repos" 0
+		return 0
+	fi
+
+	print_result "headless contract uses deployed framework paths for project repos" 1 \
+		"Output still contains ambiguous source-repo framework path guidance"
+	return 0
+}
+
+test_parse_initial_model_does_not_set_explicit_override() {
+	local role="worker" session_key="issue-22862" work_dir="$TEST_ROOT" title="Issue #22862" prompt="/full-loop test" prompt_file=""
+	local model_override="" initial_model="" tier_override="" variant_override="" agent_name="" headless_runtime="" detach=0
+	local -a extra_args=()
+
+	_parse_run_args --initial-model openai/gpt-5.5 --tier sonnet --opencode-arg --print-logs
+
+	if [[ "$initial_model" == "openai/gpt-5.5" && -z "$model_override" && "$tier_override" == "sonnet" ]]; then
+		print_result "--initial-model does not set explicit model override" 0
+		return 0
+	fi
+
+	print_result "--initial-model does not set explicit model override" 1 \
+		"initial_model=${initial_model:-<empty>} model_override=${model_override:-<empty>} tier=${tier_override:-<empty>}"
+	return 0
+}
+
+test_startup_no_activity_timeout_returns_watchdog_continue() {
+	local output_file="${TEST_ROOT}/startup-stall.log"
+	printf '%s\n' 'sqlite-migration:done' >"$output_file"
+	_run_result_label=""
+	_run_failure_reason=""
+	_run_should_retry=0
+
+	local status=0
+	_handle_run_result 124 "$output_file" "worker" "openai" "issue-22862" "openai/gpt-5.5" || status=$?
+
+	if [[ "$status" -eq 78 && "$_run_result_label" == "watchdog_startup_continue" && "$_run_failure_reason" == "startup_no_model_activity" && ! -f "$output_file" ]]; then
+		print_result "startup no-activity timeout attempts bounded continuation" 0
+		return 0
+	fi
+
+	print_result "startup no-activity timeout attempts bounded continuation" 1 \
+		"status=$status label=${_run_result_label:-<empty>} reason=${_run_failure_reason:-<empty>} output_exists=$([[ -f "$output_file" ]] && printf yes || printf no)"
+	return 0
+}
+
+test_startup_no_activity_can_rotate_after_continuation_budget() {
+	local result status action next_model
+	result=$(
+		cmd_run_action=""
+		cmd_run_next_model=""
+		_run_failure_reason="startup_no_model_activity"
+		_run_should_retry=0
+		_HRW_STATUS_FAIL="fail"
+		print_warning() { return 0; }
+		choose_model() { printf '%s' 'anthropic/claude-sonnet-4-6'; return 0; }
+		_cmd_run_finish() { return 0; }
+		local retry_status=0
+		_cmd_run_prepare_retry "worker" "issue-24949" "" 1 3 "openai/gpt-5.5" 78 || retry_status=$?
+		printf '%s|%s|%s' "$retry_status" "$cmd_run_action" "$cmd_run_next_model"
+	)
+	IFS='|' read -r status action next_model <<<"$result"
+
+	if [[ "$status" -eq 0 && "$action" == "switch" && "$next_model" == "anthropic/claude-sonnet-4-6" ]]; then
+		print_result "startup no-activity can rotate after continuation budget" 0
+		return 0
+	fi
+
+	print_result "startup no-activity can rotate after continuation budget" 1 \
+		"status=$status action=${action:-<empty>} next=${next_model:-<empty>}"
+	return 0
+}
+
+test_sigkill_with_activity_attempts_continuation() {
+	local output_file="${TEST_ROOT}/sigkill-with-activity.jsonl"
+	cat >"$output_file" <<'EOF'
+{"type":"text","text":"I made a change after reading docs that mention rate limit."}
+[WORKER_EXIT_DIAGNOSTICS] exit_code=137 model=openai/gpt-5.5 role=worker session_key=issue-23036
+[WORKER_EXIT_DIAGNOSTICS] cause=SIGKILL (OOM or external kill)
+EOF
+	_run_result_label=""
+	_run_failure_reason=""
+	_run_runtime_error_type=""
+	_run_classification_source=""
+	_run_classification_pattern=""
+
+	local status=0
+	_handle_run_result 137 "$output_file" "worker" "openai" "issue-23036" "openai/gpt-5.5" || status=$?
+
+	if [[ "$status" -eq 78 && "$_run_result_label" == "signal_killed_continue" && "$_run_runtime_error_type" == "sigkill" && ! -f "$output_file" ]]; then
+		print_result "SIGKILL with activity attempts continuation" 0
+		return 0
+	fi
+
+	print_result "SIGKILL with activity attempts continuation" 1 \
+		"status=$status label=${_run_result_label:-<empty>} runtime=${_run_runtime_error_type:-<empty>} output_exists=$([[ -f "$output_file" ]] && printf yes || printf no)"
+	return 0
+}
+
+test_sigterm_with_local_kill_reason_does_not_resume_as_provider_drop() {
+	local output_file="${TEST_ROOT}/sigterm-local-kill.jsonl"
+	cat >"$output_file" <<'EOF'
+{"type":"text","text":"I was working before the local watchdog killed me."}
+[WORKER_EXIT_DIAGNOSTICS] exit_code=143 model=openai/gpt-5.5 role=worker session_key=issue-25394
+EOF
+	_run_result_label=""
+	_run_failure_reason=""
+	_run_runtime_error_type=""
+	_run_classification_source=""
+	_run_classification_pattern=""
+	_metric_kill_reason="no_output_stall"
+
+	local status=0
+	_handle_run_result 143 "$output_file" "worker" "openai" "issue-25394" "openai/gpt-5.5" || status=$?
+	unset _metric_kill_reason 2>/dev/null || true
+
+	if [[ "$status" -eq 83 && "$_run_result_label" == "local_kill" && "$_run_failure_reason" == "no_output_stall" && "$_run_runtime_error_type" == "sigterm" && "$_run_classification_source" == "worker_kill_reason_sentinel" && ! -f "$output_file" ]]; then
+		print_result "SIGTERM with local kill reason is not treated as provider/runtime drop" 0
+		return 0
+	fi
+
+	print_result "SIGTERM with local kill reason is not treated as provider/runtime drop" 1 \
+		"status=$status label=${_run_result_label:-<empty>} reason=${_run_failure_reason:-<empty>} runtime=${_run_runtime_error_type:-<empty>} source=${_run_classification_source:-<empty>} output_exists=$([[ -f "$output_file" ]] && printf yes || printf no)"
+	return 0
+}
+
+test_handle_run_result_tolerates_empty_or_non_numeric_exit_code() {
+	local empty_output_file="${TEST_ROOT}/empty-exit-code.jsonl"
+	local text_output_file="${TEST_ROOT}/text-exit-code.jsonl"
+	printf '%s\n' 'runtime exited before writing a numeric status' >"$empty_output_file"
+	printf '%s\n' 'runtime wrote a non-numeric status' >"$text_output_file"
+	_run_result_label=""
+	_run_failure_reason=""
+	_run_should_retry=0
+
+	local empty_status=0 empty_error=""
+	set +e
+	empty_error=$(_handle_run_result "" "$empty_output_file" "worker" "openai" "issue-25437" "openai/gpt-5.5" 2>&1)
+	empty_status=$?
+	set -e
+
+	local text_status=0 text_error=""
+	set +e
+	text_error=$(_handle_run_result "not-a-number" "$text_output_file" "worker" "openai" "issue-25437" "openai/gpt-5.5" 2>&1)
+	text_status=$?
+	set -e
+
+	if [[ "$empty_status" -eq 1 && "$text_status" -eq 1 ]] && \
+		[[ "$empty_error" != *"syntax error"* && "$empty_error" != *"numeric argument"* ]] && \
+		[[ "$text_error" != *"syntax error"* && "$text_error" != *"numeric argument"* ]]; then
+		print_result "_handle_run_result tolerates empty or non-numeric exit code" 0
+		return 0
+	fi
+
+	print_result "_handle_run_result tolerates empty or non-numeric exit code" 1 \
+		"empty_status=$empty_status empty_error=${empty_error:-<empty>} text_status=$text_status text_error=${text_error:-<empty>}"
+	return 0
+}
+
+test_dispatcher_initial_model_can_rotate_after_rate_limit() {
+	local result status action next_model
+	result=$(
+		cmd_run_action=""
+		cmd_run_next_model=""
+		_run_failure_reason="rate_limit"
+		_run_should_retry=0
+		_HRW_STATUS_FAIL="fail"
+		print_warning() { return 0; }
+		choose_model() { printf '%s' 'anthropic/claude-sonnet-4-6'; return 0; }
+		_cmd_run_finish() { return 0; }
+		local retry_status=0
+		_cmd_run_prepare_retry "worker" "issue-22862" "" 1 3 "openai/gpt-5.5" 124 || retry_status=$?
+		printf '%s|%s|%s' "$retry_status" "$cmd_run_action" "$cmd_run_next_model"
+	)
+	IFS='|' read -r status action next_model <<<"$result"
+
+	if [[ "$status" -eq 0 && "$action" == "switch" && "$next_model" == "anthropic/claude-sonnet-4-6" ]]; then
+		print_result "dispatcher-selected initial model can rotate after rate limit" 0
+		return 0
+	fi
+
+	print_result "dispatcher-selected initial model can rotate after rate limit" 1 \
+		"status=$status action=${action:-<empty>} next=${next_model:-<empty>}"
+	return 0
+}
+
+test_explicit_model_override_remains_pinned_on_rate_limit() {
+	local result status finished_status action
+	result=$(
+		cmd_run_action=""
+		cmd_run_next_model=""
+		_run_failure_reason="rate_limit"
+		_run_should_retry=0
+		_HRW_STATUS_FAIL="fail"
+		print_warning() { return 0; }
+		local finished_inner=""
+		_cmd_run_finish() { local status_arg="$2"; finished_inner="$status_arg"; return 0; }
+		local retry_status=0
+		_cmd_run_prepare_retry "worker" "issue-22862" "openai/gpt-5.5" 1 3 "openai/gpt-5.5" 124 || retry_status=$?
+		printf '%s|%s|%s' "$retry_status" "$finished_inner" "$cmd_run_action"
+	)
+	IFS='|' read -r status finished_status action <<<"$result"
+
+	if [[ "$status" -eq 124 && "$finished_status" == "fail" && "$action" == "retry" ]]; then
+		print_result "explicit model override remains pinned on rate limit" 0
+		return 0
+	fi
+
+	print_result "explicit model override remains pinned on rate limit" 1 \
+		"status=$status finish=${finished_status:-<empty>} action=${action:-<empty>}"
+	return 0
+}
+
+test_issue_worker_env_contract_rejects_missing_env() {
+	unset WORKER_ISSUE_NUMBER WORKER_WORKTREE_PATH 2>/dev/null || true
+	local output=""
+	local status=0
+	output=$(_validate_issue_worker_env_contract \
+		"worker" "issue-22438" "$TEST_ROOT" "Issue #22438: env contract" \
+		"/full-loop Implement issue #22438" 2>&1) || status=$?
+
+	if [[ "$status" -ne 0 && "$output" == *"WORKER_ISSUE_NUMBER unset"* ]]; then
+		print_result "issue worker env contract rejects missing WORKER_ISSUE_NUMBER" 0
+		return 0
+	fi
+
+	print_result "issue worker env contract rejects missing WORKER_ISSUE_NUMBER" 1 \
+		"status=$status output=${output:-<empty>}"
+	return 0
+}
+
+test_issue_worker_env_contract_rejects_missing_worktree() {
+	export WORKER_ISSUE_NUMBER="22438"
+	export WORKER_REPO_SLUG="owner/repo"
+	unset WORKER_WORKTREE_PATH 2>/dev/null || true
+	local output=""
+	local status=0
+	output=$(_validate_issue_worker_env_contract \
+		"worker" "issue-22438" "$TEST_ROOT" "Issue #22438: env contract" \
+		"/full-loop Implement issue #22438" 2>&1) || status=$?
+
+	if [[ "$status" -ne 0 && "$output" == *"WORKER_WORKTREE_PATH unset"* ]]; then
+		print_result "issue worker env contract rejects missing WORKER_WORKTREE_PATH" 0
+		unset WORKER_ISSUE_NUMBER WORKER_REPO_SLUG 2>/dev/null || true
+		return 0
+	fi
+
+	print_result "issue worker env contract rejects missing WORKER_WORKTREE_PATH" 1 \
+		"status=$status output=${output:-<empty>}"
+	unset WORKER_ISSUE_NUMBER WORKER_REPO_SLUG 2>/dev/null || true
+	return 0
+}
+
+test_issue_worker_env_contract_accepts_valid_precreated_worktree() {
+	local worktree_dir="${TEST_ROOT}/precreated-worktree"
+	mkdir -p "$worktree_dir"
+	init_git_worktree "$worktree_dir"
+	export WORKER_ISSUE_NUMBER="22438"
+	export WORKER_REPO_SLUG="owner/repo"
+	export WORKER_WORKTREE_PATH="$worktree_dir"
+
+	if _validate_issue_worker_env_contract \
+		"worker" "issue-22438" "$worktree_dir" "Issue #22438: env contract" \
+		"/full-loop Implement issue #22438"; then
+		print_result "issue worker env contract accepts valid precreated worktree" 0
+		unset WORKER_ISSUE_NUMBER WORKER_REPO_SLUG WORKER_WORKTREE_PATH 2>/dev/null || true
+		return 0
+	fi
+
+	print_result "issue worker env contract accepts valid precreated worktree" 1
+	unset WORKER_ISSUE_NUMBER WORKER_REPO_SLUG WORKER_WORKTREE_PATH 2>/dev/null || true
+	return 0
+}
+
+test_worker_worktree_claim_transfers_to_runtime_pid() {
+	local worktree_dir="${TEST_ROOT}/claim-worktree"
+	mkdir -p "$worktree_dir"
+	export WORKER_ISSUE_NUMBER="22438"
+
+	local claimed_path="" claimed_branch="" claimed_session="" claimed_task="" claimed_pid=""
+	claim_worktree_ownership() {
+		claimed_path="$1"
+		claimed_branch="$2"
+		shift 2
+		while [[ $# -gt 0 ]]; do
+			case "$1" in
+			--session)
+				claimed_session="${2:-}"
+				shift 2
+				;;
+			--task)
+				claimed_task="${2:-}"
+				shift 2
+				;;
+			--owner-pid)
+				claimed_pid="${2:-}"
+				shift 2
+				;;
+			*) shift ;;
+			esac
+		done
+		return 0
+	}
+
+	_hrw_claim_worker_worktree "issue-22438" "$worktree_dir" >/dev/null
+
+	unset -f claim_worktree_ownership 2>/dev/null || true
+	unset WORKER_ISSUE_NUMBER 2>/dev/null || true
+
+	if [[ "$claimed_path" == "$worktree_dir" ]] &&
+		[[ "$claimed_branch" == "detached" ]] &&
+		[[ "$claimed_session" == "issue-22438" ]] &&
+		[[ "$claimed_task" == "22438" ]] &&
+		[[ "$claimed_pid" == "$$" ]]; then
+		print_result "worker worktree claim transfers ownership to runtime PID" 0
+		return 0
+	fi
+
+	print_result "worker worktree claim transfers ownership to runtime PID" 1 \
+		"path=$claimed_path branch=$claimed_branch session=$claimed_session task=$claimed_task pid=$claimed_pid"
+	return 0
+}
+
+test_worker_worktree_claim_reclaims_stale_live_same_task_owner() {
+	local worktree_dir="${TEST_ROOT}/claim-stale-live-owner"
+	mkdir -p "$worktree_dir"
+	init_git_worktree "$worktree_dir"
+	export WORKER_ISSUE_NUMBER="22438"
+	export MAESTRO_WORKER_WORKTREE_OWNER_RECLAIM_AGE_SECONDS="1"
+	local claim_calls=0 unregister_called=0
+	local live_pid="$$"
+
+	claim_worktree_ownership() {
+		local claim_path="$1"
+		local claim_branch="$2"
+		shift 2
+		claim_calls=$((claim_calls + 1))
+		[[ -n "$claim_path" && -n "$claim_branch" ]] || return 1
+		[[ "$claim_calls" -gt 1 ]] && return 0
+		return 1
+	}
+	check_worktree_owner() {
+		local check_path="$1"
+		[[ -n "$check_path" ]] || return 1
+		printf '%s|%s|%s|%s|%s\n' "$live_pid" "old-session" "" "22438" "2000-01-01T00:00:00Z"
+		return 0
+	}
+	unregister_worktree() {
+		local unregister_path="$1"
+		[[ -n "$unregister_path" ]] || return 1
+		unregister_called=$((unregister_called + 1))
+		return 0
+	}
+
+	local status=0
+	_hrw_claim_worker_worktree "issue-22438" "$worktree_dir" >/dev/null || status=$?
+
+	unset -f claim_worktree_ownership check_worktree_owner unregister_worktree 2>/dev/null || true
+	unset WORKER_ISSUE_NUMBER MAESTRO_WORKER_WORKTREE_OWNER_RECLAIM_AGE_SECONDS _WORKER_PRELAUNCH_FAILURE_REASON 2>/dev/null || true
+
+	if [[ "$status" -eq 0 && "$claim_calls" -eq 2 && "$unregister_called" -eq 1 ]]; then
+		print_result "worker worktree claim reclaims stale live same-task owner" 0
+		return 0
+	fi
+
+	print_result "worker worktree claim reclaims stale live same-task owner" 1 \
+		"status=$status calls=$claim_calls unregister=$unregister_called"
+	return 0
+}
+
+test_worker_worktree_claim_reclaims_dispatch_precreate_owner() {
+	local worktree_dir="${TEST_ROOT}/claim-dispatch-precreate-owner"
+	mkdir -p "$worktree_dir"
+	init_git_worktree "$worktree_dir"
+	export WORKER_ISSUE_NUMBER="22438"
+	export MAESTRO_WORKER_WORKTREE_OWNER_RECLAIM_AGE_SECONDS="900"
+	local claim_calls=0 unregister_called=0
+	local live_pid="$$"
+
+	claim_worktree_ownership() {
+		local claim_path="$1"
+		local claim_branch="$2"
+		shift 2
+		claim_calls=$((claim_calls + 1))
+		[[ -n "$claim_path" && -n "$claim_branch" ]] || return 1
+		[[ "$claim_calls" -gt 1 ]] && return 0
+		return 1
+	}
+	check_worktree_owner() {
+		local check_path="$1"
+		[[ -n "$check_path" ]] || return 1
+		printf '%s|%s|%s|%s|%s\n' "$live_pid" "dispatch-precreate-22438" "" "22438" "2099-01-01T00:00:00Z"
+		return 0
+	}
+	unregister_worktree() {
+		local unregister_path="$1"
+		[[ -n "$unregister_path" ]] || return 1
+		unregister_called=$((unregister_called + 1))
+		return 0
+	}
+
+	local status=0
+	_hrw_claim_worker_worktree "issue-22438" "$worktree_dir" >/dev/null || status=$?
+
+	unset -f claim_worktree_ownership check_worktree_owner unregister_worktree 2>/dev/null || true
+	unset WORKER_ISSUE_NUMBER MAESTRO_WORKER_WORKTREE_OWNER_RECLAIM_AGE_SECONDS _WORKER_PRELAUNCH_FAILURE_REASON 2>/dev/null || true
+
+	if [[ "$status" -eq 0 && "$claim_calls" -eq 2 && "$unregister_called" -eq 1 ]]; then
+		print_result "worker worktree claim reclaims dispatch precreate owner" 0
+		return 0
+	fi
+
+	print_result "worker worktree claim reclaims dispatch precreate owner" 1 \
+		"status=$status calls=$claim_calls unregister=$unregister_called"
+	return 0
+}
+
+test_worker_worktree_clean_without_upstream_blocks_local_commits() {
+	local worktree_dir="${TEST_ROOT}/claim-local-commits"
+	mkdir -p "$worktree_dir"
+	init_git_worktree "$worktree_dir"
+	git -C "$worktree_dir" config --unset branch.main.remote 2>/dev/null || true
+	git -C "$worktree_dir" config --unset branch.main.merge 2>/dev/null || true
+	git -C "$worktree_dir" -c user.name="maestro-test" -c user.email="maestro-test@example.invalid" \
+		commit --allow-empty -q -m "local-only"
+
+	local status=0
+	_hrw_worktree_clean_for_owner_reclaim "$worktree_dir" >/dev/null || status=$?
+
+	if [[ "$status" -ne 0 ]]; then
+		print_result "worker worktree clean check blocks no-upstream local commits" 0
+		return 0
+	fi
+
+	print_result "worker worktree clean check blocks no-upstream local commits" 1 "status=$status"
+	return 0
+}
+
+test_worker_worktree_claim_classifies_unreclaimed_live_owner() {
+	local worktree_dir="${TEST_ROOT}/claim-live-owner-blocked"
+	mkdir -p "$worktree_dir"
+	export WORKER_ISSUE_NUMBER="22438"
+	local live_pid="$$"
+
+	claim_worktree_ownership() {
+		local claim_path="$1"
+		local claim_branch="$2"
+		shift 2
+		[[ -n "$claim_path" && -n "$claim_branch" ]] || return 1
+		return 1
+	}
+	check_worktree_owner() {
+		local check_path="$1"
+		[[ -n "$check_path" ]] || return 1
+		printf '%s|%s|%s|%s|%s\n' "$live_pid" "active-session" "" "99999" "2000-01-01T00:00:00Z"
+		return 0
+	}
+	unregister_worktree() { local unregister_path="$1"; [[ -n "$unregister_path" ]] || return 1; return 0; }
+
+	local status=0
+	_hrw_claim_worker_worktree "issue-22438" "$worktree_dir" >/dev/null 2>&1 || status=$?
+	local reason="${_WORKER_PRELAUNCH_FAILURE_REASON:-}"
+
+	unset -f claim_worktree_ownership check_worktree_owner unregister_worktree 2>/dev/null || true
+	unset WORKER_ISSUE_NUMBER _WORKER_PRELAUNCH_FAILURE_REASON 2>/dev/null || true
+
+	if [[ "$status" -ne 0 && "$reason" == "worker_worktree_live_owner" ]]; then
+		print_result "worker worktree claim classifies unreclaimed live owner" 0
+		return 0
+	fi
+
+	print_result "worker worktree claim classifies unreclaimed live owner" 1 \
+		"status=$status reason=${reason:-<empty>}"
+	return 0
+}
+
+test_deleted_cwd_recovery_uses_worker_worktree() {
+	local worktree_dir="${TEST_ROOT}/deleted-cwd-worktree"
+	local stale_dir="${TEST_ROOT}/deleted-cwd-stale"
+	local output=""
+	local status=0
+	mkdir -p "$worktree_dir" "$stale_dir"
+	export WORKER_WORKTREE_PATH="$worktree_dir"
+
+	set +e
+	output=$(
+		cd "$stale_dir" || exit 20
+		rmdir "$stale_dir" || exit 21
+		_recover_deleted_cwd_before_launch "$TEST_ROOT" "test" 2>&1 || exit $?
+		pwd -P
+	)
+	status=$?
+	set -e
+
+	unset WORKER_WORKTREE_PATH 2>/dev/null || true
+	if [[ "$status" -eq 0 && "$output" == *"recovered_deleted_cwd"* && "$output" == *"$worktree_dir"* ]]; then
+		print_result "deleted cwd recovery cd's to worker worktree before launch" 0
+		return 0
+	fi
+
+	print_result "deleted cwd recovery cd's to worker worktree before launch" 1 \
+		"status=$status output=${output:-<empty>}"
+	return 0
+}
+
+test_cmd_run_aborts_issue_worker_before_canary_when_env_missing() {
+	unset WORKER_ISSUE_NUMBER WORKER_WORKTREE_PATH 2>/dev/null || true
+	local canary_called=0
+	_run_canary_test() { canary_called=1; return 0; }
+
+	local output=""
+	local status=0
+	output=$(cmd_run \
+		--role worker \
+		--session-key issue-22438 \
+		--dir "$TEST_ROOT" \
+		--title "Issue #22438: env contract" \
+		--prompt "/full-loop Implement issue #22438" 2>&1) || status=$?
+
+	unset -f _run_canary_test 2>/dev/null || true
+	if [[ "$status" -ne 0 && "$canary_called" -eq 0 && "$output" == *"WORKER_ISSUE_NUMBER unset"* ]]; then
+		print_result "cmd_run aborts issue worker before canary when env missing" 0
+		return 0
+	fi
+
+	print_result "cmd_run aborts issue worker before canary when env missing" 1 \
+		"status=$status canary_called=$canary_called output=${output:-<empty>}"
+	return 0
+}
+
+test_cmd_run_preserves_worker_origin_overrides_before_canary() {
+	local worktree_dir="${TEST_ROOT}/origin-override-worktree"
+	mkdir -p "$worktree_dir"
+	init_git_worktree "$worktree_dir"
+	export WORKER_ISSUE_NUMBER=23558
+	export WORKER_REPO_SLUG="owner/repo"
+	export WORKER_WORKTREE_PATH="$worktree_dir"
+	export MAESTRO_SESSION_ORIGIN=interactive
+	export MAESTRO_HEADLESS=already-set
+
+	choose_model() { printf '%s' 'openai/gpt-5.5'; return 0; }
+	_enforce_opencode_version_pin() { return 0; }
+	_run_canary_test() {
+		if [[ "${MAESTRO_SESSION_ORIGIN:-}" == "interactive" && "${MAESTRO_HEADLESS:-}" == "already-set" ]]; then
+			printf '%s\n' 'canary_saw_origin_overrides'
+		fi
+		return 1
+	}
+
+	local output=""
+	local status=0
+	output=$(cmd_run \
+		--role worker \
+		--session-key issue-23558 \
+		--dir "$worktree_dir" \
+		--title "Issue #23558: origin overrides" \
+		--prompt "/full-loop Implement issue #23558" 2>&1) || status=$?
+
+	unset WORKER_ISSUE_NUMBER WORKER_REPO_SLUG WORKER_WORKTREE_PATH MAESTRO_SESSION_ORIGIN MAESTRO_HEADLESS 2>/dev/null || true
+	unset -f choose_model _enforce_opencode_version_pin _run_canary_test 2>/dev/null || true
+	if [[ "$status" -eq 1 && "$output" == *"canary_saw_origin_overrides"* && "$output" == *"Canary failed"* ]]; then
+		print_result "cmd_run preserves worker origin env overrides before canary" 0
+		return 0
+	fi
+
+	print_result "cmd_run preserves worker origin env overrides before canary" 1 \
+		"status=$status output=${output:-<empty>}"
+	return 0
+}
+
+test_deleted_launch_cwd_recovers_to_work_dir() {
+	local stale_dir="${TEST_ROOT}/stale-cwd"
+	local worktree_dir="${TEST_ROOT}/worker-worktree"
+	mkdir -p "$stale_dir" "$worktree_dir"
+
+	local output=""
+	local status=0
+	output=$(
+		cd "$stale_dir" || exit 1
+		rmdir "$stale_dir" || exit 1
+		_ensure_valid_launch_cwd "$worktree_dir" || exit $?
+		pwd -P
+	) 2>&1 || status=$?
+
+	if [[ "$status" -eq 0 && "$output" == *"$worktree_dir"* ]]; then
+		print_result "deleted launch cwd recovers to worker worktree before runtime startup" 0
+		return 0
+	fi
+
+	print_result "deleted launch cwd recovers to worker worktree before runtime startup" 1 \
+		"status=$status output=${output:-<empty>}"
+	return 0
+}
+
+test_does_not_double_append() {
+	local prompt='/full-loop Continue issue #14964
+
+[HEADLESS_CONTINUATION_CONTRACT_V8]
+This worker run is unattended.'
+	local output
+	output=$(append_worker_headless_contract "$prompt")
+
+	if [[ "$output" == "$prompt" ]]; then
+		print_result "does not double-append existing contract" 0
+		return 0
+	fi
+
+	print_result "does not double-append existing contract" 1 "Existing contract was modified"
+	return 0
+}
+
+test_extract_session_id_from_output_returns_latest_session_id() {
+	local output_file="${TEST_ROOT}/opencode-output.jsonl"
+	cat >"$output_file" <<'EOF'
+not-json
+{"type":"message","sessionID":"ses_early"}
+{"type":"tool_use","part":{"sessionID":"ses_latest"}}
+EOF
+
+	local session_id
+	session_id=$(extract_session_id_from_output "$output_file")
+	if [[ "$session_id" == "ses_latest" ]]; then
+		print_result "extract_session_id_from_output returns latest session id" 0
+		return 0
+	fi
+	print_result "extract_session_id_from_output returns latest session id" 1 "Expected ses_latest, got ${session_id:-<empty>}"
+	return 0
+}
+
+test_provider_sessions_scope_issue_keys_by_repo_slug() {
+	local provider="openai"
+	local model="openai/gpt-5.5"
+	local old_repo_slug="${WORKER_REPO_SLUG:-}"
+	export WORKER_REPO_SLUG="owner/one"
+	store_session_id "$provider" "issue-47" "ses_one" "$model"
+	export WORKER_REPO_SLUG="Owner/Two"
+	store_session_id "$provider" "issue-47" "ses_two" "$model"
+
+	local first_session="" second_session="" unscoped_count=""
+	export WORKER_REPO_SLUG="owner/one"
+	first_session=$(get_session_id "$provider" "issue-47")
+	export WORKER_REPO_SLUG="owner/two"
+	second_session=$(get_session_id "$provider" "issue-47")
+	unscoped_count=$(db_query "SELECT count(*) FROM provider_sessions WHERE provider = 'openai' AND session_key = 'issue-47';")
+	if [[ -n "$old_repo_slug" ]]; then
+		export WORKER_REPO_SLUG="$old_repo_slug"
+	else
+		unset WORKER_REPO_SLUG
+	fi
+
+	if [[ "$first_session" == "ses_one" && "$second_session" == "ses_two" && "$unscoped_count" == "0" ]]; then
+		print_result "provider_sessions scope issue keys by repo slug" 0
+		return 0
+	fi
+
+	print_result "provider_sessions scope issue keys by repo slug" 1 \
+		"first=${first_session:-<empty>} second=${second_session:-<empty>} unscoped_count=${unscoped_count:-<empty>}"
+	return 0
+}
+
+test_provider_sessions_keep_pulse_unscoped() {
+	local provider="openai"
+	local model="openai/gpt-5.5"
+	local old_repo_slug="${WORKER_REPO_SLUG:-}"
+	export WORKER_REPO_SLUG="owner/one"
+	store_session_id "$provider" "pulse" "ses_pulse" "$model"
+	local pulse_session="" pulse_count=""
+	pulse_session=$(get_session_id "$provider" "pulse")
+	pulse_count=$(db_query "SELECT count(*) FROM provider_sessions WHERE provider = 'openai' AND session_key = 'pulse';")
+	if [[ -n "$old_repo_slug" ]]; then
+		export WORKER_REPO_SLUG="$old_repo_slug"
+	else
+		unset WORKER_REPO_SLUG
+	fi
+
+	if [[ "$pulse_session" == "ses_pulse" && "$pulse_count" == "1" ]]; then
+		print_result "provider_sessions keep pulse sessions unscoped" 0
+		return 0
+	fi
+
+	print_result "provider_sessions keep pulse sessions unscoped" 1 \
+		"pulse=${pulse_session:-<empty>} count=${pulse_count:-<empty>}"
+	return 0
+}
+
+test_blocked_completion_records_blocked_label() {
+	local output_file="${TEST_ROOT}/blocked-output.jsonl"
+	printf '%s\n' '{"type":"text","sessionID":"ses_blocked","text":"BLOCKED: missing dependency credentials"}' >"$output_file"
+	local rc=0
+	_handle_run_result 0 "$output_file" "worker" "openai" "issue-456" "openai/gpt-5.5" || rc=$?
+	[[ "$rc" -eq 0 && "${_run_result_label:-}" == "blocked" && "${_run_failure_reason:-}" == "blocked" && "${_run_classification_source:-}" == "model_blocked_signal" ]] && { print_result "BLOCKED terminal signal records blocked label" 0; return 0; }
+	print_result "BLOCKED terminal signal records blocked label" 1 \
+		"rc=$rc label=${_run_result_label:-<unset>} reason=${_run_failure_reason:-<unset>} source=${_run_classification_source:-<unset>}"
+	return 0
+}
+test_missing_context_blocked_requests_brief_recovery() {
+	local output_file="${TEST_ROOT}/missing-context-blocked-output.jsonl"
+	printf '%s\n' '{"type":"text","sessionID":"ses_blocked","text":"BLOCKED: missing implementation context"}' >"$output_file"
+	local rc=0
+	_handle_run_result 0 "$output_file" "worker" "openai" "issue-456" "openai/gpt-5.5" || rc=$?
+	[[ "$rc" -eq 82 && "${_run_result_label:-}" == "brief_recovery" && "${_run_failure_reason:-}" == "missing_implementation_context" && "${_run_classification_pattern:-}" == "missing_implementation_context" ]] && { print_result "missing-context BLOCKED requests brief recovery" 0; return 0; }
+	print_result "missing-context BLOCKED requests brief recovery" 1 \
+		"rc=$rc label=${_run_result_label:-<unset>} reason=${_run_failure_reason:-<unset>} pattern=${_run_classification_pattern:-<unset>}"
+	return 0
+}
+
+test_headless_activity_timeout_default_matches_watchdog() {
+	local expected="600"
+	local actual="${HEADLESS_ACTIVITY_TIMEOUT_SECONDS:-}"
+
+	if [[ "$actual" == "$expected" ]]; then
+		print_result "HEADLESS_ACTIVITY_TIMEOUT_SECONDS default matches watchdog default" 0
+		return 0
+	fi
+
+	print_result "HEADLESS_ACTIVITY_TIMEOUT_SECONDS default matches watchdog default" 1 \
+		"Expected ${expected}s to avoid GPT-5.x no-output false kills; got '${actual:-<unset>}'"
+	return 0
+}
+
+test_activity_watchdog_classifiers_detect_rate_limit_and_ci_wait() {
+	local output_file="${TEST_ROOT}/activity-classifier.out"
+
+	printf 'OpenAI error: HTTP 429 rate limit exceeded\n' >"$output_file"
+	if _activity_output_has_provider_rate_limit "$output_file"; then
+		print_result "activity watchdog detects provider rate-limit marker" 0
+	else
+		print_result "activity watchdog detects provider rate-limit marker" 1
+	fi
+
+	printf 'waiting for CI checks to finish before merge\n' >"$output_file"
+	if _activity_output_has_ci_wait "$output_file"; then
+		print_result "activity watchdog detects CI-wait marker" 0
+	else
+		print_result "activity watchdog detects CI-wait marker" 1
+	fi
+
+	return 0
+}
+
+test_failure_classifier_records_provenance() {
+	local output_file="${TEST_ROOT}/failure-classifier.out"
+	local reason_file="${TEST_ROOT}/failure-classifier.reason"
+	printf 'Provider returned HTTP 429: Too Many Requests\n' >"$output_file"
+
+	local reason
+	classify_failure_reason "$output_file" >"$reason_file"
+	reason=$(<"$reason_file")
+
+	if [[ "$reason" == "rate_limit" ]] &&
+		[[ "${_failure_provider_error_type:-}" == "rate_limit" ]] &&
+		[[ "${_failure_provider_status:-}" == "429" ]] &&
+		[[ "${_failure_classification_source:-}" == "trusted_provider" ]] &&
+		[[ "${_failure_classification_pattern:-}" == *"too_many_requests"* ]]; then
+		print_result "failure classifier records provider provenance" 0
+		return 0
+	fi
+
+	print_result "failure classifier records provider provenance" 1 \
+		"reason=$reason type=${_failure_provider_error_type:-} status=${_failure_provider_status:-} source=${_failure_classification_source:-} pattern=${_failure_classification_pattern:-}"
+	return 0
+}
+
+test_failure_classifier_distinguishes_quota_exhaustion() {
+	local output_file="${TEST_ROOT}/failure-classifier-quota.out"
+	local reason_file="${TEST_ROOT}/failure-classifier-quota.reason"
+	printf 'OpenAI provider error HTTP 429: {"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}\n' >"$output_file"
+
+	local reason
+	classify_failure_reason "$output_file" >"$reason_file"
+	reason=$(<"$reason_file")
+
+	if [[ "$reason" == "quota_exceeded" ]] &&
+		[[ "${_failure_provider_error_type:-}" == "quota_exceeded" ]] &&
+		[[ "${_failure_provider_status:-}" == "429" ]] &&
+		[[ "${_failure_classification_source:-}" == "trusted_provider" ]]; then
+		print_result "failure classifier distinguishes OpenAI quota exhaustion" 0
+		return 0
+	fi
+
+	print_result "failure classifier distinguishes OpenAI quota exhaustion" 1 \
+		"reason=$reason type=${_failure_provider_error_type:-} status=${_failure_provider_status:-} source=${_failure_classification_source:-} pattern=${_failure_classification_pattern:-}"
+	return 0
+}
+
+test_failure_classifier_distinguishes_anthropic_credit_exhaustion() {
+	local output_file="${TEST_ROOT}/failure-classifier-anthropic-quota.out"
+	local reason_file="${TEST_ROOT}/failure-classifier-anthropic-quota.reason"
+	printf 'Anthropic provider error HTTP 429: {"error":{"type":"credit_exhausted","message":"You have exhausted your credit"}}\n' >"$output_file"
+
+	local reason
+	classify_failure_reason "$output_file" >"$reason_file"
+	reason=$(<"$reason_file")
+
+	if [[ "$reason" == "quota_exceeded" ]] &&
+		[[ "${_failure_provider_error_type:-}" == "quota_exceeded" ]] &&
+		[[ "${_failure_provider_status:-}" == "429" ]] &&
+		[[ "${_failure_classification_source:-}" == "trusted_provider" ]] &&
+		[[ "${_failure_classification_pattern:-}" == *"credit_exhausted"* ]]; then
+		print_result "failure classifier distinguishes Anthropic credit exhaustion" 0
+		return 0
+	fi
+
+	print_result "failure classifier distinguishes Anthropic credit exhaustion" 1 \
+		"reason=$reason type=${_failure_provider_error_type:-} status=${_failure_provider_status:-} source=${_failure_classification_source:-} pattern=${_failure_classification_pattern:-}"
+	return 0
+}
+
+test_service_interruption_candidate_uses_separate_path() {
+	local output_file="${TEST_ROOT}/service-interruption.out"
+	printf '%s\n' '{"type":"text","sessionID":"ses_23037","text":"editing files"}' 'OpenAI 503 service unavailable after tool activity' >"$output_file"
+	_run_result_label=""
+	_run_failure_reason=""
+	_run_should_retry=0
+
+	local status=0
+	_handle_run_result 1 "$output_file" "worker" "openai" "issue-23037" "openai/gpt-5.5" || status=$?
+
+	if [[ "$status" -eq 81 && "$_run_result_label" == "service_interruption_continue" && -f "$output_file" ]]; then
+		print_result "service interruption uses dedicated continuation path" 0
+	else
+		print_result "service interruption uses dedicated continuation path" 1 \
+			"status=$status label=${_run_result_label:-<empty>} reason=${_run_failure_reason:-<empty>} output_exists=$([[ -f "$output_file" ]] && printf yes || printf no)"
+	fi
+
+	local local_output_file="${TEST_ROOT}/service-interruption-local.out"
+	printf '%s\n' '{"type":"text","sessionID":"ses_local","text":"editing files"}' 'worker received SIGTERM after tool activity' >"$local_output_file"
+	_run_result_label=""
+	_run_failure_reason=""
+	status=0
+	_handle_run_result 143 "$local_output_file" "worker" "openai" "issue-23037" "openai/gpt-5.5" || status=$?
+
+	if [[ "$status" -eq 78 && "$_run_result_label" == "signal_terminated_continue" && "$_run_runtime_error_type" == "sigterm" && ! -f "$local_output_file" ]]; then
+		print_result "SIGTERM uses signal-specific continuation path" 0
+	else
+		print_result "SIGTERM uses signal-specific continuation path" 1 \
+			"status=$status label=${_run_result_label:-<empty>} runtime=${_run_runtime_error_type:-<empty>} output_exists=$([[ -f "$local_output_file" ]] && printf yes || printf no)"
+	fi
+
+	if ! service_interruption_continue_candidate "rate_limit" "1" "1" "" "rate_limit"; then
+		print_result "rate limits do not consume service interruption budget" 0
+	else
+		print_result "rate limits do not consume service interruption budget" 1
+	fi
+
+	if service_interruption_continue_candidate "auth_error" "1" "1" "" "auth_error"; then
+		print_result "auth errors with activity consume service interruption budget" 0
+	else
+		print_result "auth errors with activity consume service interruption budget" 1
+	fi
+
+	if ! service_interruption_continue_candidate "auth_error" "1" "0" "" "auth_error"; then
+		print_result "startup auth errors do not consume service interruption budget" 0
+	else
+		print_result "startup auth errors do not consume service interruption budget" 1
+	fi
+
+	local auth_refresh_output_file="${TEST_ROOT}/service-interruption-auth-refresh.out"
+	printf '%s\n' '{"type":"text","sessionID":"ses_auth","text":"editing files"}' 'Token refresh failed: 401' >"$auth_refresh_output_file"
+	_run_result_label=""
+	_run_failure_reason=""
+	status=0
+	_handle_run_result 1 "$auth_refresh_output_file" "worker" "anthropic" "issue-23037" "anthropic/claude-sonnet-4-6" || status=$?
+
+	if [[ "$status" -eq 81 && "$_run_result_label" == "service_interruption_continue" && "$_run_failure_reason" == "auth_error" && -f "$auth_refresh_output_file" ]]; then
+		print_result "token refresh 401 with session evidence resumes as service interruption" 0
+	else
+		print_result "token refresh 401 with session evidence resumes as service interruption" 1 \
+			"status=$status label=${_run_result_label:-<empty>} reason=${_run_failure_reason:-<empty>} output_exists=$([[ -f "$auth_refresh_output_file" ]] && printf yes || printf no)"
+	fi
+
+	if service_interruption_continue_candidate "local_error" "137" "1" "" ""; then
+		print_result "SIGKILL with activity can resume as interruption" 0
+	else
+		print_result "SIGKILL with activity can resume as interruption" 1
+	fi
+
+	if ! service_interruption_continue_candidate "local_error" "143" "1" "" ""; then
+		print_result "SIGTERM does not consume service interruption budget" 0
+	else
+		print_result "SIGTERM does not consume service interruption budget" 1
+	fi
+
+	local terminated_tail_file="${TEST_ROOT}/terminated-tail.out"
+	printf '%s\n' '{"type":"text","sessionID":"ses_tail","text":"editing files"}' 'terminated' >"$terminated_tail_file"
+	if runtime_signal_terminated_candidate "$terminated_tail_file" "1" "1"; then
+		print_result "terminated tail classifies as signal termination" 0
+	else
+		print_result "terminated tail classifies as signal termination" 1
+	fi
+
+	return 0
+}
+
+test_service_interruption_exhausted_metric_preserves_context() {
+	local captured_file="${TEST_ROOT}/service-interruption-exhausted.args"
+	append_runtime_metric() {
+		printf '%s\n' "$@" >"$captured_file"
+		return 0
+	}
+	local WORKER_ISSUE_NUMBER="24099"
+	local DISPATCH_REPO_SLUG="owner/repo"
+	local _run_provider_error_type=""
+	local _run_provider_status=""
+	local _run_runtime_error_type=""
+	local _run_classification_source="default_local"
+	local _run_classification_pattern="default_local"
+	local _metric_kill_reason="unknown"
+
+	_append_service_interruption_exhausted_metric \
+		"worker" "issue-24099" "openai/gpt-5.5" \
+		"${TEST_ROOT}/worktree" "local_error" \
+		"${TEST_ROOT}/excerpt.log" "ses_context"
+
+	local captured
+	captured=$(<"$captured_file")
+	if [[ "$captured" == *$'service_interruption_exhausted\n81\nlocal_error\n1\n0\n24099\nowner/repo\n'* ]] && \
+		[[ "$captured" == *$'excerpt.log\nses_context\n'* ]] && \
+		[[ "$captured" == *$'mid_session_interruption\nunknown\nresume_existing_session'* ]]; then
+		print_result "service interruption exhausted metric preserves diagnostics context" 0
+	else
+		print_result "service interruption exhausted metric preserves diagnostics context" 1 "$captured"
+	fi
+	unset -f append_runtime_metric 2>/dev/null || true
+	return 0
+}
+
+test_canary_pins_vanilla_agent_with_isolated_plugin_config() {
+	local canary_root="${TEST_ROOT}/canary-agent"
+	local fake_bin_dir="${canary_root}/bin"
+	local plugin_dir="${canary_root}/plugin path"
+	local plugin_path="${plugin_dir}/index.mjs"
+	local args_file="${canary_root}/args.txt"
+	local env_file="${canary_root}/env.txt"
+	mkdir -p "$fake_bin_dir" "$plugin_dir"
+	printf '%s\n' 'export default {};' >"$plugin_path"
+
+	cat >"${fake_bin_dir}/opencode" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+	printf '1.14.31\n'
+	exit 0
+fi
+if [[ -n "${OPENCODE_SESSION_ID:-}${OPENCODE_PID:-}${OPENCODE_RUN_ID:-}${OPENCODE_PROCESS_ROLE:-}${OPENCODE:-}${OPENCODE_SERVER_PASSWORD:-}" ]]; then
+	printf 'leaked session env\n' >"$MAESTRO_CANARY_ENV_FILE"
+	exit 42
+fi
+printf '%s\n' "$*" >"$MAESTRO_CANARY_ARGS_FILE"
+printf 'OPENCODE_BIN=%s\nOPENCODE_DB=%s\nMAESTRO_HEADLESS=%s\n' \
+	"${OPENCODE_BIN:-}" "${OPENCODE_DB:-}" "${MAESTRO_HEADLESS:-}" >"$MAESTRO_CANARY_ENV_FILE"
+if [[ -f "${XDG_CONFIG_HOME:-}/opencode/opencode.json" ]]; then
+	printf 'CONFIG=%s\n' "$(<"${XDG_CONFIG_HOME}/opencode/opencode.json")" >>"$MAESTRO_CANARY_ENV_FILE"
+fi
+printf 'The answer is Four.\n'
+exit 0
+EOF
+	chmod +x "${fake_bin_dir}/opencode"
+
+	local output
+	if output=$(
+		PATH="${fake_bin_dir}:$PATH" \
+		HOME="${canary_root}/home" \
+		OPENCODE_BIN="${fake_bin_dir}/opencode" \
+		OPENCODE_DB="${canary_root}/opencode.db" \
+		OPENCODE_SESSION_ID="ses_parent" \
+		OPENCODE_PID="12345" \
+		OPENCODE_RUN_ID="run_parent" \
+		OPENCODE_PROCESS_ROLE="tui" \
+		OPENCODE="1" \
+		OPENCODE_SERVER_PASSWORD="session-password" \
+		MAESTRO_PLUGIN_INDEX="$plugin_path" \
+		MAESTRO_CANARY_ARGS_FILE="$args_file" \
+		MAESTRO_CANARY_ENV_FILE="$env_file" \
+		MAESTRO_HEADLESS_RUNTIME_DIR="${canary_root}/runtime" \
+		CANARY_CACHE_TTL_SECONDS=0 \
+		CANARY_TIMEOUT_SECONDS=5 \
+		bash -c 'source "$1" help >/dev/null 2>&1; _run_canary_test "anthropic/claude-sonnet-4-6"' _ "$HELPER_SCRIPT"
+	) && [[ -f "$args_file" && -f "$env_file" ]]; then
+		local args
+		args=$(<"$args_file")
+		local env_output
+		env_output=$(<"$env_file")
+		local expected_plugin_url
+		expected_plugin_url=$(python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).absolute().as_uri())' "$plugin_path")
+		if [[ "$args" == *'What is two plus two?'* && "$args" != *'--pure'* && "$args" == *'--agent build'* ]] &&
+			[[ "$env_output" == *"OPENCODE_BIN=${fake_bin_dir}/opencode"* ]] &&
+			[[ "$env_output" == *"OPENCODE_DB=${canary_root}/opencode.db"* ]] &&
+			[[ "$env_output" == *"MAESTRO_HEADLESS=1"* ]] &&
+			[[ "$env_output" == *"$expected_plugin_url"* ]]; then
+			print_result "canary pins vanilla agent with isolated plugin config" 0
+			return 0
+		fi
+		print_result "canary pins vanilla agent with isolated plugin config" 1 \
+			"Expected benign prompt, no --pure, but with --agent build, headless env, plugin config, and preserved OpenCode config env; got args: ${args}; env: ${env_output}"
+		return 0
+	fi
+
+	print_result "canary pins vanilla agent with isolated plugin config" 1 \
+		"Canary stub did not run successfully: ${output:-<empty>}"
+	return 0
+}
+
+test_opencode_session_env_wrapper_strips_session_vars_only() {
+	local output
+	# shellcheck disable=SC2016 # Inner bash expands these after env stripping.
+	output=$(
+		OPENCODE_SESSION_ID="ses_parent" \
+		OPENCODE_PID="12345" \
+		OPENCODE_RUN_ID="run_parent" \
+		OPENCODE_PROCESS_ROLE="tui" \
+		OPENCODE="1" \
+		OPENCODE_SERVER_PASSWORD="session-password" \
+		OPENCODE_BIN="opencode" \
+		OPENCODE_DB="/tmp/opencode.db" \
+		run_without_opencode_session_env bash -c '
+			printf "%s|%s|%s|%s|%s|%s|%s|%s" \
+				"${OPENCODE_SESSION_ID:-}" "${OPENCODE_PID:-}" "${OPENCODE_RUN_ID:-}" \
+				"${OPENCODE_PROCESS_ROLE:-}" "${OPENCODE:-}" "${OPENCODE_SERVER_PASSWORD:-}" \
+				"${OPENCODE_BIN:-}" "${OPENCODE_DB:-}"
+		'
+	)
+
+	if [[ "$output" == "||||||opencode|/tmp/opencode.db" ]]; then
+		print_result "OpenCode session env wrapper strips only session-bound vars" 0
+		return 0
+	fi
+
+	print_result "OpenCode session env wrapper strips only session-bound vars" 1 \
+		"Expected session vars stripped and config env preserved, got: ${output}"
+	return 0
+}
+
+test_worker_opencode_exec_paths_strip_session_env() {
+	if grep -Fq "run_without_opencode_session_env \"\$SANDBOX_EXEC_HELPER\" run" "$HELPER_SCRIPT" &&
+		grep -Fq "run_without_opencode_session_env timeout \"\$HEADLESS_SANDBOX_TIMEOUT_DEFAULT\"" "$HELPER_SCRIPT"; then
+		print_result "worker OpenCode exec paths strip session env" 0
+		return 0
+	fi
+
+	print_result "worker OpenCode exec paths strip session env" 1 \
+		"Expected sandbox and bare-timeout OpenCode exec paths to use run_without_opencode_session_env"
+	return 0
+}
+
+test_worker_opencode_invocation_seeds_continuation_session() {
+	if grep -Fq "_seed_worker_db_session_context \"\$isolated_data_dir\" \"\$_invoke_persisted_session\"" "$HELPER_SCRIPT" &&
+		grep -Fq "[lifecycle] db_seeded session=\$_invoke_persisted_session" "$HELPER_SCRIPT"; then
+		print_result "worker OpenCode invocation seeds persisted continuation session" 0
+		return 0
+	fi
+
+	print_result "worker OpenCode invocation seeds persisted continuation session" 1 \
+		"Expected persisted session seeding before opencode continuation launch"
+	return 0
+}
+
+test_sandbox_passthrough_scopes_provider_env() {
+	local csv
+	csv=$(
+		OPENAI_API_KEY='openai-test' \
+		ANTHROPIC_API_KEY='anthropic-test' \
+		GOOGLE_API_KEY='google-test' \
+		OPENCODE_BIN='opencode' \
+		OPENCODE_DB='/tmp/opencode.db' \
+		OPENCODE_SESSION_ID='ses_parent' \
+		OPENCODE_PID='12345' \
+		OPENCODE_RUN_ID='run_parent' \
+		OPENCODE_PROCESS_ROLE='tui' \
+		OPENCODE='1' \
+		OPENCODE_SERVER_PASSWORD='session-password' \
+		build_sandbox_passthrough_csv "openai"
+	)
+
+	if [[ "$csv" == *"OPENAI_API_KEY"* ]] &&
+		[[ "$csv" != *"ANTHROPIC_API_KEY"* ]] &&
+		[[ "$csv" != *"GOOGLE_API_KEY"* ]] &&
+		[[ "$csv" == *"OPENCODE_BIN"* ]] &&
+		[[ "$csv" == *"OPENCODE_DB"* ]] &&
+		[[ "$csv" != *"OPENCODE_SESSION_ID"* ]] &&
+		[[ "$csv" != *"OPENCODE_PID"* ]] &&
+		[[ "$csv" != *"OPENCODE_RUN_ID"* ]] &&
+		[[ "$csv" != *"OPENCODE_PROCESS_ROLE"* ]] &&
+		[[ "$csv" != *"OPENCODE_SERVER_PASSWORD"* ]] &&
+		[[ ",$csv," != *",OPENCODE,"* ]]; then
+		print_result "sandbox passthrough scopes env to selected provider" 0
+		return 0
+	fi
+
+	print_result "sandbox passthrough scopes env to selected provider" 1 \
+		"Expected OpenAI env only, got: ${csv}"
+	return 0
+}
+
+test_copy_scoped_opencode_auth_keeps_selected_provider_only() {
+	local auth_root="${TEST_ROOT}/scoped-auth"
+	local source_auth="${auth_root}/source.json"
+	local dest_auth="${auth_root}/dest/opencode/auth.json"
+	mkdir -p "$auth_root"
+	cat >"$source_auth" <<'EOF'
+{
+  "openai": {"type": "oauth", "access": "openai-token"},
+  "anthropic": {"type": "oauth", "access": "anthropic-token"}
+}
+EOF
+
+	copy_scoped_opencode_auth "$source_auth" "$dest_auth" "openai"
+
+	local has_openai has_anthropic
+	has_openai=$(jq -r 'has("openai")' "$dest_auth")
+	has_anthropic=$(jq -r 'has("anthropic")' "$dest_auth")
+	if [[ "$has_openai" == "true" && "$has_anthropic" == "false" ]]; then
+		print_result "copy_scoped_opencode_auth keeps selected provider only" 0
+		return 0
+	fi
+
+	print_result "copy_scoped_opencode_auth keeps selected provider only" 1 \
+		"Expected only openai auth entry in ${dest_auth}"
+	return 0
+}
+
+test_seed_worker_db_session_context_copies_only_selected_session() {
+	local shared_dir="${HOME}/.local/share/opencode"
+	local isolated_dir="${TEST_ROOT}/isolated-opencode-data"
+	local shared_db="${shared_dir}/opencode.db"
+	local worker_db="${isolated_dir}/opencode/opencode.db"
+	mkdir -p "$shared_dir" "${isolated_dir}/opencode"
+	rm -f "$shared_db" "$worker_db"
+
+	sqlite3 "$shared_db" <<'SQL'
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL);
+CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);
+INSERT INTO project VALUES ('project-keep', 'Keep Project');
+INSERT INTO project VALUES ('project-other', 'Other Project');
+INSERT INTO session VALUES ('session-keep', 'project-keep', 'Keep');
+INSERT INTO session VALUES ('session-other', 'project-other', 'Other');
+INSERT INTO message VALUES ('message-keep-1', 'session-keep', 'one');
+INSERT INTO message VALUES ('message-keep-2', 'session-keep', 'two');
+INSERT INTO message VALUES ('message-other', 'session-other', 'other');
+SQL
+	sqlite3 "$shared_db" .schema | sqlite3 "$worker_db"
+
+	_seed_worker_db_session_context "$isolated_dir" "session-keep"
+
+	local sessions messages other_sessions other_messages projects
+	sessions=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM session WHERE id = 'session-keep';")
+	messages=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM message WHERE session_id = 'session-keep';")
+	other_sessions=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM session WHERE id = 'session-other';")
+	other_messages=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM message WHERE session_id = 'session-other';")
+	projects=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM project WHERE id = 'project-keep';")
+
+	if [[ "$sessions" == "1" && "$messages" == "2" && "$other_sessions" == "0" && "$other_messages" == "0" && "$projects" == "1" ]]; then
+		print_result "seed worker DB copies only selected continuation session" 0
+		return 0
+	fi
+
+	print_result "seed worker DB copies only selected continuation session" 1 \
+		"sessions=$sessions messages=$messages other_sessions=$other_sessions other_messages=$other_messages projects=$projects"
+	return 0
+}
+
+test_seed_worker_db_session_context_copies_migration_metadata() {
+	local shared_dir="${HOME}/.local/share/opencode"
+	local isolated_dir="${TEST_ROOT}/isolated-opencode-metadata"
+	local shared_db="${shared_dir}/opencode.db"
+	local worker_db="${isolated_dir}/opencode/opencode.db"
+	mkdir -p "$shared_dir" "${isolated_dir}/opencode"
+	rm -f "$shared_db" "$worker_db"
+
+	sqlite3 "$shared_db" <<'SQL'
+CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash TEXT NOT NULL, created_at INTEGER);
+CREATE TABLE data_migration (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL);
+CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL);
+CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);
+INSERT INTO __drizzle_migrations VALUES (1, 'schema-ready', 12345);
+INSERT INTO data_migration VALUES ('data-ready', 67890);
+INSERT INTO migration VALUES ('opencode-v16-ready', 1700000000);
+INSERT INTO project VALUES ('project-keep', 'Keep Project');
+INSERT INTO session VALUES ('session-keep', 'project-keep', 'Keep');
+INSERT INTO message VALUES ('message-keep', 'session-keep', 'one');
+SQL
+
+	_seed_worker_db_session_context "$isolated_dir" "session-keep"
+
+	local schema_migrations data_migrations migration_rows sessions messages
+	schema_migrations=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM __drizzle_migrations WHERE hash = 'schema-ready';")
+	data_migrations=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM data_migration WHERE id = 'data-ready';")
+	migration_rows=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM migration WHERE id = 'opencode-v16-ready';")
+	sessions=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM session WHERE id = 'session-keep';")
+	messages=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM message WHERE session_id = 'session-keep';")
+
+	if [[ "$schema_migrations" == "1" && "$data_migrations" == "1" && "$migration_rows" == "1" && "$sessions" == "1" && "$messages" == "1" ]]; then
+		print_result "seed worker DB copies migration metadata for continuation" 0
+		return 0
+	fi
+
+	print_result "seed worker DB copies migration metadata for continuation" 1 \
+		"schema_migrations=$schema_migrations data_migrations=$data_migrations migration_rows=$migration_rows sessions=$sessions messages=$messages"
+	return 0
+}
+
+test_seed_worker_db_session_context_uses_backup_for_fresh_db() {
+	local shared_dir="${HOME}/.local/share/opencode"
+	local isolated_dir="${TEST_ROOT}/isolated-opencode-backup-seed"
+	local shared_db="${shared_dir}/opencode.db"
+	local worker_db="${isolated_dir}/opencode/opencode.db"
+	mkdir -p "$shared_dir" "${isolated_dir}/opencode"
+	rm -f "$shared_db" "$worker_db"
+
+	sqlite3 "$shared_db" <<'SQL'
+PRAGMA user_version = 42;
+CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash TEXT NOT NULL, created_at INTEGER);
+CREATE TABLE data_migration (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL);
+CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL);
+CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);
+INSERT INTO __drizzle_migrations VALUES (1, 'schema-ready', 12345);
+INSERT INTO data_migration VALUES ('data-ready', 67890);
+INSERT INTO migration VALUES ('opencode-v17-ready', 1700000000);
+INSERT INTO project VALUES ('project-keep', 'Keep Project');
+INSERT INTO project VALUES ('project-other', 'Other Project');
+INSERT INTO session VALUES ('session-keep', 'project-keep', 'Keep');
+INSERT INTO session VALUES ('session-other', 'project-other', 'Other');
+INSERT INTO message VALUES ('message-keep', 'session-keep', 'one');
+INSERT INTO message VALUES ('message-other', 'session-other', 'other');
+SQL
+
+	_seed_worker_db_session_context "$isolated_dir" "session-keep"
+
+	local user_version schema_migrations sessions other_sessions messages other_messages projects other_projects
+	user_version=$(sqlite3 "$worker_db" "PRAGMA user_version;")
+	schema_migrations=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM __drizzle_migrations WHERE hash = 'schema-ready';")
+	sessions=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM session WHERE id = 'session-keep';")
+	other_sessions=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM session WHERE id = 'session-other';")
+	messages=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM message WHERE session_id = 'session-keep';")
+	other_messages=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM message WHERE session_id = 'session-other';")
+	projects=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM project WHERE id = 'project-keep';")
+	other_projects=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM project WHERE id = 'project-other';")
+
+	if [[ "$user_version" == "42" && "$schema_migrations" == "1" && "$sessions" == "1" && "$other_sessions" == "0" && "$messages" == "1" && "$other_messages" == "0" && "$projects" == "1" && "$other_projects" == "0" ]]; then
+		print_result "seed worker DB uses shared backup for fresh continuation DB" 0
+		return 0
+	fi
+
+	print_result "seed worker DB uses shared backup for fresh continuation DB" 1 \
+		"user_version=$user_version schema_migrations=$schema_migrations sessions=$sessions other_sessions=$other_sessions messages=$messages other_messages=$other_messages projects=$projects other_projects=$other_projects"
+	return 0
+}
+
+test_seed_worker_db_session_context_vacuums_pruned_backup() {
+	local shared_dir="${HOME}/.local/share/opencode"
+	local isolated_dir="${TEST_ROOT}/isolated-opencode-vacuum-seed"
+	local shared_db="${shared_dir}/opencode.db"
+	local worker_db="${isolated_dir}/opencode/opencode.db"
+	mkdir -p "$shared_dir" "${isolated_dir}/opencode"
+	rm -f "$shared_db" "$worker_db"
+
+	sqlite3 "$shared_db" <<'SQL'
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL);
+CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data BLOB NOT NULL);
+INSERT INTO project VALUES ('project-keep', 'Keep Project');
+INSERT INTO project VALUES ('project-other', 'Other Project');
+INSERT INTO session VALUES ('session-keep', 'project-keep', 'Keep');
+INSERT INTO session VALUES ('session-other', 'project-other', 'Other');
+INSERT INTO message VALUES ('message-keep', 'session-keep', zeroblob(1024));
+INSERT INTO message VALUES ('message-other', 'session-other', zeroblob(1048576));
+SQL
+
+	_seed_worker_db_session_context "$isolated_dir" "session-keep"
+
+	local other_messages freelist_count
+	other_messages=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM message WHERE session_id = 'session-other';")
+	freelist_count=$(sqlite3 "$worker_db" "PRAGMA freelist_count;")
+
+	if [[ "$other_messages" == "0" && "$freelist_count" == "0" ]]; then
+		print_result "seed worker DB vacuums pruned backup pages" 0
+		return 0
+	fi
+
+	print_result "seed worker DB vacuums pruned backup pages" 1 \
+		"other_messages=$other_messages freelist_count=$freelist_count"
+	return 0
+}
+
+test_sync_worker_db_migration_metadata_repairs_prewarmed_project_table() {
+	local shared_dir="${HOME}/.local/share/opencode"
+	local isolated_dir="${TEST_ROOT}/isolated-opencode-prewarm"
+	local shared_db="${shared_dir}/opencode.db"
+	local worker_db="${isolated_dir}/opencode/opencode.db"
+	mkdir -p "$shared_dir" "${isolated_dir}/opencode"
+	rm -f "$shared_db" "$worker_db"
+
+	sqlite3 "$shared_db" <<'SQL'
+CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash TEXT NOT NULL, created_at INTEGER);
+CREATE TABLE data_migration (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL);
+CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+INSERT INTO __drizzle_migrations VALUES (1, 'schema-ready', 12345);
+INSERT INTO data_migration VALUES ('data-ready', 67890);
+INSERT INTO migration VALUES ('opencode-v16-ready', 1700000000);
+SQL
+	sqlite3 "$worker_db" <<'SQL'
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+INSERT INTO project VALUES ('prewarmed-project', 'Prewarmed Project');
+SQL
+
+	_sync_worker_db_migration_metadata "$isolated_dir"
+
+	local schema_migrations data_migrations migration_rows projects
+	schema_migrations=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM __drizzle_migrations WHERE hash = 'schema-ready';")
+	data_migrations=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM data_migration WHERE id = 'data-ready';")
+	migration_rows=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM migration WHERE id = 'opencode-v16-ready';")
+	projects=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM project WHERE id = 'prewarmed-project';")
+
+	if [[ "$schema_migrations" == "1" && "$data_migrations" == "1" && "$migration_rows" == "1" && "$projects" == "1" ]]; then
+		print_result "sync worker DB migration metadata repairs prewarmed project table" 0
+		return 0
+	fi
+
+	print_result "sync worker DB migration metadata repairs prewarmed project table" 1 \
+		"schema_migrations=$schema_migrations data_migrations=$data_migrations migration_rows=$migration_rows projects=$projects"
+	return 0
+}
+
+test_sync_worker_db_migration_metadata_replaces_stale_ledgers() {
+	local shared_dir="${HOME}/.local/share/opencode"
+	local isolated_dir="${TEST_ROOT}/isolated-opencode-stale-ledger"
+	local shared_db="${shared_dir}/opencode.db"
+	local worker_db="${isolated_dir}/opencode/opencode.db"
+	mkdir -p "$shared_dir" "${isolated_dir}/opencode"
+	rm -f "$shared_db" "$worker_db"
+
+	sqlite3 "$shared_db" <<'SQL'
+CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash TEXT NOT NULL, created_at INTEGER);
+CREATE TABLE data_migration (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL);
+CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+INSERT INTO __drizzle_migrations VALUES (1, 'shared-schema-ready', 12345);
+INSERT INTO data_migration VALUES ('shared-data-ready', 67890);
+INSERT INTO migration VALUES ('shared-opencode-ready', 1700000000);
+SQL
+	sqlite3 "$worker_db" <<'SQL'
+CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash TEXT NOT NULL, created_at INTEGER);
+CREATE TABLE data_migration (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL);
+CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+INSERT INTO __drizzle_migrations VALUES (1, 'stale-schema-row', 11111);
+INSERT INTO data_migration VALUES ('shared-data-ready', 22222);
+INSERT INTO migration VALUES ('shared-opencode-ready', 33333);
+INSERT INTO project VALUES ('prewarmed-project', 'Prewarmed Project');
+SQL
+
+	_sync_worker_db_migration_metadata "$isolated_dir"
+
+	local schema_hash data_updated_at migration_completed projects
+	schema_hash=$(sqlite3 "$worker_db" "SELECT hash FROM __drizzle_migrations WHERE id = 1;")
+	data_updated_at=$(sqlite3 "$worker_db" "SELECT updated_at FROM data_migration WHERE id = 'shared-data-ready';")
+	migration_completed=$(sqlite3 "$worker_db" "SELECT time_completed FROM migration WHERE id = 'shared-opencode-ready';")
+	projects=$(sqlite3 "$worker_db" "SELECT COUNT(*) FROM project WHERE id = 'prewarmed-project';")
+
+	if [[ "$schema_hash" == "shared-schema-ready" && "$data_updated_at" == "67890" && "$migration_completed" == "1700000000" && "$projects" == "1" ]]; then
+		print_result "sync worker DB replaces stale migration ledger rows" 0
+		return 0
+	fi
+
+	print_result "sync worker DB replaces stale migration ledger rows" 1 \
+		"schema_hash=$schema_hash data_updated_at=$data_updated_at migration_completed=$migration_completed projects=$projects"
+	return 0
+}
+
+test_copy_worker_db_migration_ledger_preserves_rows_when_attach_fails() {
+	local shared_dir="${HOME}/.local/share/opencode"
+	local isolated_dir="${TEST_ROOT}/isolated-opencode-attach-failure"
+	local shared_db="${shared_dir}/opencode.db"
+	local worker_db="${isolated_dir}/opencode/opencode.db"
+	local sqlite_wrapper
+	mkdir -p "$shared_dir" "${isolated_dir}/opencode"
+	rm -f "$shared_db" "$worker_db"
+
+	sqlite3 "$shared_db" <<'SQL'
+CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash TEXT NOT NULL, created_at INTEGER);
+INSERT INTO __drizzle_migrations VALUES (1, 'shared-schema-ready', 12345);
+SQL
+	sqlite3 "$worker_db" <<'SQL'
+CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash TEXT NOT NULL, created_at INTEGER);
+INSERT INTO __drizzle_migrations VALUES (1, 'stale-schema-row', 11111);
+SQL
+
+	sqlite_wrapper=$(declare -f sqlite3_with_timeout | sed '1s/sqlite3_with_timeout/sqlite3_with_timeout_original_for_test/')
+	eval "$sqlite_wrapper"
+	sqlite3_with_timeout() {
+		local db_path="${1:-}"
+		local line
+		local sql_input
+
+		if [[ "$db_path" == "$worker_db" && "$#" -eq 1 ]]; then
+			sql_input=""
+			while IFS= read -r line; do
+				sql_input+="${line}"$'\n'
+			done
+			if [[ "$sql_input" == *"ATTACH DATABASE"* ]]; then
+				return 1
+			fi
+			printf '%s\n' "$sql_input" | sqlite3_with_timeout_original_for_test "$db_path"
+			return $?
+		fi
+
+		sqlite3_with_timeout_original_for_test "$@"
+		return $?
+	}
+
+	_copy_worker_db_migration_ledger_table "$worker_db" "$shared_db" "__drizzle_migrations" >/dev/null 2>&1 || true
+
+	eval "$(declare -f sqlite3_with_timeout_original_for_test | sed '1s/sqlite3_with_timeout_original_for_test/sqlite3_with_timeout/')"
+	unset -f sqlite3_with_timeout_original_for_test
+
+	local schema_hash
+	schema_hash=$(sqlite3 "$worker_db" "SELECT hash FROM __drizzle_migrations WHERE id = 1;")
+	if [[ "$schema_hash" == "stale-schema-row" ]]; then
+		print_result "copy worker DB migration ledger preserves rows when attach fails" 0
+		return 0
+	fi
+
+	print_result "copy worker DB migration ledger preserves rows when attach fails" 1 "schema_hash=$schema_hash"
+	return 0
+}
+
+test_copy_worker_db_migration_ledger_stops_when_schema_query_fails() {
+	local shared_dir="${HOME}/.local/share/opencode"
+	local isolated_dir="${TEST_ROOT}/isolated-opencode-schema-query-failure"
+	local shared_db="${shared_dir}/opencode.db"
+	local worker_db="${isolated_dir}/opencode/opencode.db"
+	local sqlite_wrapper
+	local create_attempts=0
+	local rc=0
+	mkdir -p "$shared_dir" "${isolated_dir}/opencode"
+	rm -f "$shared_db" "$worker_db"
+
+	sqlite3 "$shared_db" <<'SQL'
+CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash TEXT NOT NULL, created_at INTEGER);
+INSERT INTO __drizzle_migrations VALUES (1, 'shared-schema-ready', 12345);
+SQL
+	sqlite3 "$worker_db" <<'SQL'
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+SQL
+
+	sqlite_wrapper=$(declare -f sqlite3_with_timeout | sed '1s/sqlite3_with_timeout/sqlite3_with_timeout_original_for_test/')
+	eval "$sqlite_wrapper"
+	sqlite3_with_timeout() {
+		local db_path="${1:-}"
+		local sql_arg="${2:-}"
+		local line
+
+		if [[ "$db_path" == "$shared_db" && "$sql_arg" == ".schema __drizzle_migrations" ]]; then
+			return 1
+		fi
+		if [[ "$db_path" == "$worker_db" && "$#" -eq 1 ]]; then
+			create_attempts=$((create_attempts + 1))
+			while IFS= read -r line; do
+				:
+			done
+			return 0
+		fi
+
+		sqlite3_with_timeout_original_for_test "$@"
+		return $?
+	}
+
+	_copy_worker_db_migration_ledger_table "$worker_db" "$shared_db" "__drizzle_migrations" >/dev/null 2>&1 || rc=$?
+
+	eval "$(declare -f sqlite3_with_timeout_original_for_test | sed '1s/sqlite3_with_timeout_original_for_test/sqlite3_with_timeout/')"
+	unset -f sqlite3_with_timeout_original_for_test
+
+	if [[ "$rc" == "1" && "$create_attempts" == "0" ]]; then
+		print_result "copy worker DB migration ledger stops when schema query fails" 0
+		return 0
+	fi
+
+	print_result "copy worker DB migration ledger stops when schema query fails" 1 "rc=$rc create_attempts=$create_attempts"
+	return 0
+}
+
+test_sync_worker_db_migration_metadata_archives_unrepairable_project_table() {
+	local shared_dir="${HOME}/.local/share/opencode"
+	local isolated_dir="${TEST_ROOT}/isolated-opencode-unrepairable"
+	local shared_db="${shared_dir}/opencode.db"
+	local worker_db="${isolated_dir}/opencode/opencode.db"
+	mkdir -p "$shared_dir" "${isolated_dir}/opencode"
+	rm -f "$shared_db" "$worker_db"
+
+	sqlite3 "$shared_db" <<'SQL'
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+SQL
+	sqlite3 "$worker_db" <<'SQL'
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+INSERT INTO project VALUES ('prewarmed-project', 'Prewarmed Project');
+SQL
+
+	_sync_worker_db_migration_metadata "$isolated_dir"
+
+	local backup_count=0 backup_file
+	for backup_file in "${isolated_dir}"/opencode/opencode.db.incomplete-migration-ledgers.*.bak; do
+		[[ -f "$backup_file" ]] || continue
+		backup_count=$((backup_count + 1))
+	done
+	if [[ ! -f "$worker_db" && "$backup_count" == "1" ]]; then
+		print_result "sync worker DB archives unrepairable prewarmed project table" 0
+		return 0
+	fi
+
+	print_result "sync worker DB archives unrepairable prewarmed project table" 1 \
+		"Expected worker DB archived once, file_exists=$([[ -f "$worker_db" ]] && printf yes || printf no) backups=${backup_count}"
+	return 0
+}
+
+test_sync_worker_db_migration_metadata_preserves_worker_db_when_shared_query_fails() {
+	local shared_dir="${HOME}/.local/share/opencode"
+	local isolated_dir="${TEST_ROOT}/isolated-opencode-shared-query-fails"
+	local shared_db="${shared_dir}/opencode.db"
+	local worker_db="${isolated_dir}/opencode/opencode.db"
+	mkdir -p "$shared_dir" "${isolated_dir}/opencode"
+	rm -f "$shared_db" "$worker_db"
+
+	printf '%s\n' 'not a sqlite database' >"$shared_db"
+	sqlite3 "$worker_db" <<'SQL'
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+INSERT INTO project VALUES ('prewarmed-project', 'Prewarmed Project');
+SQL
+
+	_sync_worker_db_migration_metadata "$isolated_dir"
+
+	local backup_count=0 backup_file
+	for backup_file in "${isolated_dir}"/opencode/opencode.db.incomplete-migration-ledgers.*.bak; do
+		[[ -f "$backup_file" ]] || continue
+		backup_count=$((backup_count + 1))
+	done
+	if [[ -f "$worker_db" && "$backup_count" == "0" ]]; then
+		print_result "sync worker DB preserves prewarmed DB when shared query fails" 0
+		return 0
+	fi
+
+	print_result "sync worker DB preserves prewarmed DB when shared query fails" 1 \
+		"Expected worker DB preserved, file_exists=$([[ -f "$worker_db" ]] && printf yes || printf no) backups=${backup_count}"
+	return 0
+}
+
+test_sync_worker_db_migration_metadata_repeated_launch_reaches_seed() {
+	local shared_dir="${HOME}/.local/share/opencode"
+	local isolated_dir="${TEST_ROOT}/isolated-opencode-repeat"
+	local shared_db="${shared_dir}/opencode.db"
+	local worker_db="${isolated_dir}/opencode/opencode.db"
+	local attempts=0 failures=0 launch_output=""
+	mkdir -p "$shared_dir" "${isolated_dir}/opencode"
+	rm -f "$shared_db" "$worker_db"
+
+	sqlite3 "$shared_db" <<'SQL'
+CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash TEXT NOT NULL, created_at INTEGER);
+CREATE TABLE data_migration (name TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+INSERT INTO __drizzle_migrations VALUES (1, 'schema-ready', 12345);
+INSERT INTO data_migration VALUES ('data-ready', 67890);
+INSERT INTO migration VALUES ('opencode-v17-ready', 1700000000);
+SQL
+	sqlite3 "$worker_db" <<'SQL'
+CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+INSERT INTO project VALUES ('prewarmed-project', 'Prewarmed Project');
+SQL
+
+	while [[ "$attempts" -lt 2 ]]; do
+		attempts=$((attempts + 1))
+		_sync_worker_db_migration_metadata "$isolated_dir"
+		if ! _worker_db_migration_ledgers_match_shared "$worker_db" "$shared_db"; then
+			failures=$((failures + 1))
+			launch_output="${launch_output}SQLiteError: table project already exists\n"
+			continue
+		fi
+		launch_output="${launch_output}SEED_PROMPT_REACHED attempt=${attempts}\n"
+	done
+
+	if [[ "$attempts" -eq 2 && "$failures" -eq 0 && "$launch_output" == *"SEED_PROMPT_REACHED attempt=1"* && "$launch_output" == *"SEED_PROMPT_REACHED attempt=2"* ]]; then
+		print_result "sync worker DB lets repeated prewarmed launches reach seed prompt" 0
+		return 0
+	fi
+
+	print_result "sync worker DB lets repeated prewarmed launches reach seed prompt" 1 \
+		"attempts=${attempts} failures=${failures} output=${launch_output}"
+	return 0
+}
+
+test_opencode_project_table_migration_replay_detected() {
+	local output_file="${TEST_ROOT}/opencode-project-replay.log"
+	local project_table_error="table \`project\` already exists"
+	printf '%s\n' 'Error: Unexpected error' "$project_table_error" >"$output_file"
+
+	if _opencode_project_table_migration_replay_detected 1 "$output_file" && \
+		! _opencode_project_table_migration_replay_detected 0 "$output_file"; then
+		print_result "detects OpenCode project table migration replay startup failure" 0
+		return 0
+	fi
+
+	print_result "detects OpenCode project table migration replay startup failure" 1 \
+		"Expected non-zero exit with project table replay output to be detected only on failure"
+	return 0
+}
+
+test_large_opencode_prompt_uses_file_attachment() {
+	local prompt="large-seed-prompt-with-worker-contract"
+	local old_threshold="${HEADLESS_PROMPT_FILE_THRESHOLD_BYTES:-}"
+	HEADLESS_PROMPT_FILE_THRESHOLD_BYTES=8
+
+	_prepare_runtime_prompt_transport "opencode" "$prompt"
+
+	local prompt_arg="$_HEADLESS_RUN_PROMPT_ARG"
+	local prompt_file="$_HEADLESS_RUN_PROMPT_FILE"
+	local cmd_text=""
+	cmd_text=$(
+		while IFS= read -r -d '' arg; do
+			printf '<%s>' "$arg"
+		done < <(_build_run_cmd "anthropic/claude-sonnet-4-6" "$TEST_ROOT" "$prompt_arg" \
+			"Prompt Transport Test" "" "" "" --file "$prompt_file")
+	)
+
+	if [[ "$prompt_arg" != *"$prompt"* ]] &&
+		[[ -f "$prompt_file" ]] &&
+		[[ "$(<"$prompt_file")" == "$prompt" ]] &&
+		[[ "$cmd_text" == *"<--file><${prompt_file}>"* ]] &&
+		[[ "$cmd_text" != *"$prompt"* ]]; then
+		_cleanup_headless_runtime_temp_paths
+		if [[ -n "$old_threshold" ]]; then
+			HEADLESS_PROMPT_FILE_THRESHOLD_BYTES="$old_threshold"
+		else
+			unset HEADLESS_PROMPT_FILE_THRESHOLD_BYTES
+		fi
+		print_result "large opencode prompts use file attachment instead of argv" 0
+		return 0
+	fi
+
+	_cleanup_headless_runtime_temp_paths
+	if [[ -n "$old_threshold" ]]; then
+		HEADLESS_PROMPT_FILE_THRESHOLD_BYTES="$old_threshold"
+	else
+		unset HEADLESS_PROMPT_FILE_THRESHOLD_BYTES
+	fi
+	print_result "large opencode prompts use file attachment instead of argv" 1 \
+		"prompt_arg=${prompt_arg} prompt_file=${prompt_file} cmd=${cmd_text}"
+	return 0
+}
+
+test_large_claude_prompt_uses_stdin_file() {
+	local prompt="large-claude-seed-prompt"
+	local old_threshold="${HEADLESS_PROMPT_FILE_THRESHOLD_BYTES:-}"
+	HEADLESS_PROMPT_FILE_THRESHOLD_BYTES=8
+
+	_prepare_runtime_prompt_transport "claude" "$prompt"
+
+	local prompt_arg="$_HEADLESS_RUN_PROMPT_ARG"
+	local stdin_file="$_HEADLESS_CLAUDE_STDIN_FILE"
+	local cmd_text=""
+	cmd_text=$(
+		while IFS= read -r -d '' arg; do
+			printf '<%s>' "$arg"
+		done < <(_build_claude_cmd "anthropic/claude-sonnet-4-6" "$TEST_ROOT" "$prompt_arg" \
+			"Prompt Transport Test" "")
+	)
+
+	if [[ -z "$prompt_arg" ]] &&
+		[[ -f "$stdin_file" ]] &&
+		[[ "$(<"$stdin_file")" == "$prompt" ]] &&
+		[[ "$cmd_text" == "<claude><-p>"* ]] &&
+		[[ "$cmd_text" != *"$prompt"* ]]; then
+		_cleanup_headless_runtime_temp_paths
+		if [[ -n "$old_threshold" ]]; then
+			HEADLESS_PROMPT_FILE_THRESHOLD_BYTES="$old_threshold"
+		else
+			unset HEADLESS_PROMPT_FILE_THRESHOLD_BYTES
+		fi
+		print_result "large claude prompts use stdin file instead of argv" 0
+		return 0
+	fi
+
+	_cleanup_headless_runtime_temp_paths
+	if [[ -n "$old_threshold" ]]; then
+		HEADLESS_PROMPT_FILE_THRESHOLD_BYTES="$old_threshold"
+	else
+		unset HEADLESS_PROMPT_FILE_THRESHOLD_BYTES
+	fi
+	print_result "large claude prompts use stdin file instead of argv" 1 \
+		"prompt_arg=${prompt_arg} stdin_file=${stdin_file} cmd=${cmd_text}"
+	return 0
+}
+
+test_registered_prompt_temp_cleanup_removes_dir() {
+	local prompt="cleanup-seed-prompt"
+	local old_threshold="${HEADLESS_PROMPT_FILE_THRESHOLD_BYTES:-}"
+	HEADLESS_PROMPT_FILE_THRESHOLD_BYTES=1
+
+	_prepare_runtime_prompt_transport "opencode" "$prompt"
+	local prompt_file="$_HEADLESS_RUN_PROMPT_FILE"
+	local prompt_dir="${prompt_file%/*}"
+	_cleanup_headless_runtime_temp_paths
+
+	if [[ -n "$prompt_dir" && ! -e "$prompt_dir" ]]; then
+		if [[ -n "$old_threshold" ]]; then
+			HEADLESS_PROMPT_FILE_THRESHOLD_BYTES="$old_threshold"
+		else
+			unset HEADLESS_PROMPT_FILE_THRESHOLD_BYTES
+		fi
+		print_result "registered prompt temp cleanup removes prompt dir" 0
+		return 0
+	fi
+
+	if [[ -n "$old_threshold" ]]; then
+		HEADLESS_PROMPT_FILE_THRESHOLD_BYTES="$old_threshold"
+	else
+		unset HEADLESS_PROMPT_FILE_THRESHOLD_BYTES
+	fi
+	print_result "registered prompt temp cleanup removes prompt dir" 1 \
+		"Prompt temp dir still exists: ${prompt_dir:-<empty>}"
+	return 0
+}
+
+# Helper: create a bare git repo and a feature branch with optional commits.
+# Each call uses work_dir-derived remote path to avoid inter-test collisions.
+# Args: $1 = work_dir path, $2 = 1 to add a commit (0 for none)
+_setup_test_git_repo() {
+	local work_dir="$1"
+	local add_commit="${2:-0}"
+	mkdir -p "$work_dir"
+	git -C "$work_dir" init -q
+	git -C "$work_dir" config user.email "test@test.local"
+	git -C "$work_dir" config user.name "Test"
+	# Create initial commit on main so origin/main reference exists
+	touch "$work_dir/README.md"
+	git -C "$work_dir" add README.md
+	git -C "$work_dir" commit -q -m "init"
+	git -C "$work_dir" branch -M main
+	# Create remote stub unique to this repo (bare repo alongside work_dir)
+	local remote_dir="${work_dir}.remote.git"
+	git init -q --bare "$remote_dir"
+	git -C "$work_dir" remote add origin "$remote_dir"
+	git -C "$work_dir" push -q origin main
+	# Switch to feature branch
+	git -C "$work_dir" checkout -q -b "feature/auto-test-issue-99999"
+	if [[ "$add_commit" -eq 1 ]]; then
+		echo "change" >"$work_dir/change.txt"
+		git -C "$work_dir" add change.txt
+		git -C "$work_dir" commit -q -m "feat: add change"
+	fi
+	return 0
+}
+
+test_worker_produced_output_no_commits_returns_noop() {
+	local work_dir="${TEST_ROOT}/repo-no-commits"
+	_setup_test_git_repo "$work_dir" 0
+	# No gh available in test env, no DISPATCH_REPO_SLUG set — signal 3 skipped
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+
+	local classification
+	classification=$(_worker_produced_output "issue-99999" "$work_dir")
+	if [[ "$classification" == "noop" ]]; then
+		print_result "_worker_produced_output returns 'noop' with zero commits" 0
+	else
+		print_result "_worker_produced_output returns 'noop' with zero commits" 1 \
+			"Expected 'noop' but got '${classification}'"
+	fi
+	return 0
+}
+
+test_worker_produced_output_with_commits_returns_pr_exists_failopen() {
+	# Commits present but no DISPATCH_REPO_SLUG → cannot confirm PR absence → fail-open (pr_exists)
+	local work_dir="${TEST_ROOT}/repo-with-commits"
+	_setup_test_git_repo "$work_dir" 1
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+
+	local classification
+	classification=$(_worker_produced_output "issue-99999" "$work_dir")
+	if [[ "$classification" == "pr_exists" ]]; then
+		print_result "_worker_produced_output returns 'pr_exists' with commits (fail-open no slug)" 0
+	else
+		print_result "_worker_produced_output returns 'pr_exists' with commits (fail-open no slug)" 1 \
+			"Expected 'pr_exists' (fail-open) but got '${classification}'"
+	fi
+	return 0
+}
+
+test_worker_produced_output_non_worker_session_returns_pr_exists() {
+	local work_dir="${TEST_ROOT}/repo-pulse"
+	_setup_test_git_repo "$work_dir" 0
+
+	# Non-worker session keys (pulse, triage) must always return pr_exists (fail-open)
+	local classification
+	classification=$(_worker_produced_output "pulse-main" "$work_dir")
+	if [[ "$classification" == "pr_exists" ]]; then
+		print_result "_worker_produced_output returns 'pr_exists' for non-worker session" 0
+	else
+		print_result "_worker_produced_output returns 'pr_exists' for non-worker session" 1 \
+			"Non-worker session should always return 'pr_exists' (fail-open), got '${classification}'"
+	fi
+	return 0
+}
+
+test_worker_produced_output_invalid_workdir_returns_pr_exists() {
+	# Missing / non-git work_dir must fail-open
+	local classification
+	classification=$(_worker_produced_output "issue-99999" "/nonexistent/path/$$")
+	if [[ "$classification" == "pr_exists" ]]; then
+		print_result "_worker_produced_output returns 'pr_exists' for invalid work_dir (fail-open)" 0
+	else
+		print_result "_worker_produced_output returns 'pr_exists' for invalid work_dir (fail-open)" 1 \
+			"Invalid work_dir should fail-open as 'pr_exists', got '${classification}'"
+	fi
+	return 0
+}
+
+test_worker_produced_output_pushed_branch_no_slug_returns_pr_exists() {
+	# Pushed branch but DISPATCH_REPO_SLUG unset → cannot check PR → fail-open (pr_exists)
+	local work_dir="${TEST_ROOT}/repo-pushed-noslug"
+	_setup_test_git_repo "$work_dir" 0
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+	git -C "$work_dir" push -q origin "feature/auto-test-issue-99999"
+
+	local classification
+	classification=$(_worker_produced_output "issue-99999" "$work_dir")
+	if [[ "$classification" == "pr_exists" ]]; then
+		print_result "_worker_produced_output returns 'pr_exists' for pushed branch (no slug, fail-open)" 0
+	else
+		print_result "_worker_produced_output returns 'pr_exists' for pushed branch (no slug, fail-open)" 1 \
+			"Expected 'pr_exists' (fail-open, no DISPATCH_REPO_SLUG), got '${classification}'"
+	fi
+	return 0
+}
+
+# AC#2: pushed branch + confirmed no PR → branch_orphan
+test_worker_produced_output_branch_no_pr_returns_branch_orphan() {
+	local work_dir="${TEST_ROOT}/repo-orphan"
+	_setup_test_git_repo "$work_dir" 1
+	git -C "$work_dir" push -q origin "feature/auto-test-issue-99999"
+	# Set DISPATCH_REPO_SLUG and stub gh to return 0 PRs
+	DISPATCH_REPO_SLUG="test-owner/test-repo"
+	gh() { printf '0'; return 0; }
+
+	local classification
+	classification=$(_worker_produced_output "issue-99999" "$work_dir")
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+	unset -f gh 2>/dev/null || true
+
+	if [[ "$classification" == "branch_orphan" ]]; then
+		print_result "_worker_produced_output returns 'branch_orphan' (commits + branch, no PR)" 0
+	else
+		print_result "_worker_produced_output returns 'branch_orphan' (commits + branch, no PR)" 1 \
+			"Expected 'branch_orphan' but got '${classification}'"
+	fi
+	return 0
+}
+
+test_worker_produced_output_local_branch_no_remote_returns_local_branch_unpushed() {
+	local work_dir="${TEST_ROOT}/repo-local-unpushed"
+	_setup_test_git_repo "$work_dir" 1
+	# Do not push the feature branch: local commits exist, remote branch absent.
+	DISPATCH_REPO_SLUG="test-owner/test-repo"
+	gh() { printf '0'; return 0; }
+
+	local classification
+	classification=$(_worker_produced_output "issue-99999" "$work_dir")
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+	unset -f gh 2>/dev/null || true
+
+	if [[ "$classification" == "local_branch_unpushed" ]]; then
+		print_result "_worker_produced_output returns 'local_branch_unpushed' for local-only committed branch" 0
+	else
+		print_result "_worker_produced_output returns 'local_branch_unpushed' for local-only committed branch" 1 \
+			"Expected 'local_branch_unpushed' but got '${classification}'"
+	fi
+	return 0
+}
+
+# AC#2 variant: PR confirmed → pr_exists even when branch is pushed
+test_worker_produced_output_branch_with_pr_returns_pr_exists() {
+	local work_dir="${TEST_ROOT}/repo-pr-exists"
+	_setup_test_git_repo "$work_dir" 1
+	git -C "$work_dir" push -q origin "feature/auto-test-issue-99999"
+	DISPATCH_REPO_SLUG="test-owner/test-repo"
+	gh() { printf '1'; return 0; }  # Stub gh: 1 PR found
+
+	local classification
+	classification=$(_worker_produced_output "issue-99999" "$work_dir")
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+	unset -f gh 2>/dev/null || true
+
+	if [[ "$classification" == "pr_exists" ]]; then
+		print_result "_worker_produced_output returns 'pr_exists' when PR confirmed" 0
+	else
+		print_result "_worker_produced_output returns 'pr_exists' when PR confirmed" 1 \
+			"Expected 'pr_exists' but got '${classification}'"
+	fi
+	return 0
+}
+
+test_cmd_run_finish_emits_noop_for_zero_output() {
+	local work_dir="${TEST_ROOT}/repo-finish-noop"
+	_setup_test_git_repo "$work_dir" 0
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+
+	# Stub lifecycle functions to capture what was called
+	local released_reason="" fast_fail_reason="" fast_fail_crash=""
+	_release_dispatch_claim() { released_reason="$2"; return 0; }
+	_report_failure_to_fast_fail() { fast_fail_reason="$2"; fast_fail_crash="$3"; return 0; }
+	_update_dispatch_ledger() { return 0; }
+	_release_session_lock() { return 0; }
+
+	_cmd_run_finish "issue-99999" "complete" "$work_dir"
+
+	if [[ "$released_reason" == "worker_noop" ]]; then
+		print_result "_cmd_run_finish emits worker_noop for zero-output exit" 0
+	else
+		print_result "_cmd_run_finish emits worker_noop for zero-output exit" 1 \
+			"Expected released_reason=worker_noop, got '${released_reason}'"
+	fi
+
+	if [[ "$fast_fail_reason" == "worker_noop_zero_output" && "$fast_fail_crash" == "no_work" ]]; then
+		print_result "_cmd_run_finish increments fast-fail on noop" 0
+	else
+		print_result "_cmd_run_finish increments fast-fail on noop" 1 \
+			"Expected fast_fail reason=worker_noop_zero_output/crash=no_work, got '${fast_fail_reason}'/'${fast_fail_crash}'"
+	fi
+	return 0
+}
+
+test_cmd_run_finish_emits_complete_for_real_output() {
+	local work_dir="${TEST_ROOT}/repo-finish-complete"
+	_setup_test_git_repo "$work_dir" 1
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+
+	local released_reason="" fast_fail_called=0
+	_release_dispatch_claim() { released_reason="$2"; return 0; }
+	_report_failure_to_fast_fail() { fast_fail_called=1; return 0; }
+	_update_dispatch_ledger() { return 0; }
+	_release_session_lock() { return 0; }
+
+	_cmd_run_finish "issue-99999" "complete" "$work_dir"
+
+	if [[ "$released_reason" == "worker_complete" ]]; then
+		print_result "_cmd_run_finish emits worker_complete for real output" 0
+	else
+		print_result "_cmd_run_finish emits worker_complete for real output" 1 \
+			"Expected released_reason=worker_complete, got '${released_reason}'"
+	fi
+
+	if [[ "$fast_fail_called" -eq 0 ]]; then
+		print_result "_cmd_run_finish does NOT increment fast-fail for real output" 0
+	else
+		print_result "_cmd_run_finish does NOT increment fast-fail for real output" 1 \
+			"fast-fail should not be called when worker produced real output"
+	fi
+	return 0
+}
+
+test_cmd_run_finish_emits_complete_when_no_workdir() {
+	# When work_dir is absent (fail paths), behaviour is unchanged: worker_complete
+	local released_reason="" fast_fail_called=0
+	_release_dispatch_claim() { released_reason="$2"; return 0; }
+	_report_failure_to_fast_fail() { fast_fail_called=1; return 0; }
+	_update_dispatch_ledger() { return 0; }
+	_release_session_lock() { return 0; }
+
+	_cmd_run_finish "issue-99999" "complete"
+
+	if [[ "$released_reason" == "worker_complete" ]]; then
+		print_result "_cmd_run_finish emits worker_complete when no work_dir provided" 0
+	else
+		print_result "_cmd_run_finish emits worker_complete when no work_dir provided" 1 \
+			"Expected worker_complete (fail-open), got '${released_reason}'"
+	fi
+	return 0
+}
+
+# AC#3: orphan-recovery attempts gh pr create with correct args
+test_attempt_orphan_recovery_pr_calls_gh_create() {
+	local work_dir="${TEST_ROOT}/repo-orphan-recovery"
+	_setup_test_git_repo "$work_dir" 1
+	git -C "$work_dir" push -q origin "feature/auto-test-issue-99999"
+	printf '{"pr_base_branch":"develop"}\n' >"${work_dir}/.maestro.json"
+
+	local gh_head="" gh_base="" gh_repo="" gh_labels=""
+	local gh_called=0
+	gh() {
+		# Capture pr create args
+		local arg
+		for arg in "$@"; do
+			case "$_last_flag" in
+			"--head") gh_head="$arg" ;;
+			"--base") gh_base="$arg" ;;
+			"--repo") gh_repo="$arg" ;;
+			"--label")
+				if [[ -z "$gh_labels" ]]; then
+					gh_labels="$arg"
+				else
+					gh_labels="${gh_labels},${arg}"
+				fi
+				;;
+			esac
+			_last_flag="$arg"
+		done
+		gh_called=1
+		return 0
+	}
+	_last_flag=""
+
+	_attempt_orphan_recovery_pr \
+		"issue-99999" "$work_dir" "feature/auto-test-issue-99999" "test-owner/test-repo"
+
+	unset -f gh 2>/dev/null || true
+
+	if [[ "$gh_called" -eq 1 ]]; then
+		print_result "_attempt_orphan_recovery_pr calls gh pr create" 0
+	else
+		print_result "_attempt_orphan_recovery_pr calls gh pr create" 1 \
+			"gh was not called"
+	fi
+
+	if [[ "$gh_head" == "feature/auto-test-issue-99999" ]]; then
+		print_result "_attempt_orphan_recovery_pr passes correct --head" 0
+	else
+		print_result "_attempt_orphan_recovery_pr passes correct --head" 1 \
+			"Expected --head=feature/auto-test-issue-99999, got '${gh_head}'"
+	fi
+
+	if [[ ",${gh_labels}," == *",origin:worker-takeover,"* ]]; then
+		print_result "_attempt_orphan_recovery_pr passes --label origin:worker-takeover" 0
+	else
+		print_result "_attempt_orphan_recovery_pr passes --label origin:worker-takeover" 1 \
+			"Expected --label=origin:worker-takeover, got '${gh_labels}'"
+	fi
+
+	if [[ ",${gh_labels}," == *",status:in-review,"* ]]; then
+		print_result "_attempt_orphan_recovery_pr passes --label status:in-review" 0
+	else
+		print_result "_attempt_orphan_recovery_pr passes --label status:in-review" 1 \
+			"Expected --label=status:in-review, got '${gh_labels}'"
+	fi
+
+	if [[ "$gh_base" == "develop" ]]; then
+		print_result "_attempt_orphan_recovery_pr uses configured PR base" 0
+	else
+		print_result "_attempt_orphan_recovery_pr uses configured PR base" 1 \
+			"Expected --base=develop, got '${gh_base}'"
+	fi
+
+	return 0
+}
+
+test_ensure_orphan_recovery_rejects_empty_branch() {
+	local work_dir="${TEST_ROOT}/repo-orphan-recovery-empty-branch"
+	_setup_test_git_repo "$work_dir" 1
+
+	local recovery_state=""
+	if recovery_state=$(_ensure_orphan_recovery_branch_remote "$work_dir" "" "99999" "test-owner/test-repo"); then
+		print_result "_ensure_orphan_recovery_branch_remote rejects empty branch" 1 \
+			"Expected failure for empty branch, got '${recovery_state}'"
+		return 0
+	fi
+
+	if [[ -z "$recovery_state" ]]; then
+		print_result "_ensure_orphan_recovery_branch_remote rejects empty branch" 0
+	else
+		print_result "_ensure_orphan_recovery_branch_remote rejects empty branch" 1 \
+			"Expected no state for empty branch, got '${recovery_state}'"
+	fi
+	return 0
+}
+
+test_build_orphan_recovery_pr_body_tolerates_missing_publish_flag() {
+	local pr_body=""
+	if ! pr_body=$(_build_orphan_recovery_pr_body "issue-99999" "feature/auto-test-issue-99999" "Resolves #99999"); then
+		print_result "_build_orphan_recovery_pr_body tolerates missing publish flag" 1 \
+			"Function failed when published_local_branch arg was omitted"
+		return 0
+	fi
+
+	if [[ "$pr_body" == *"worker_branch_orphan"* ]] && [[ "$pr_body" != *"worker_local_branch_unpushed"* ]]; then
+		print_result "_build_orphan_recovery_pr_body tolerates missing publish flag" 0
+	else
+		print_result "_build_orphan_recovery_pr_body tolerates missing publish flag" 1 \
+			"Expected default orphan marker, got '${pr_body}'"
+	fi
+	return 0
+}
+
+# AC#4: on auto-PR success, _cmd_run_finish emits worker_complete with orphan note
+test_cmd_run_finish_orphan_recovery_success_emits_worker_complete() {
+	local work_dir="${TEST_ROOT}/repo-finish-orphan-ok"
+	_setup_test_git_repo "$work_dir" 1
+	git -C "$work_dir" push -q origin "feature/auto-test-issue-99999"
+	DISPATCH_REPO_SLUG="test-owner/test-repo"
+
+	# Stub gh: pr list returns 0 (no PR); pr create succeeds; issue view = OPEN
+	gh() {
+		if [[ "${*}" == *"pr list"* ]]; then printf '0'
+		elif [[ "${*}" == *"issue view"* ]]; then printf 'OPEN'
+		elif [[ "${*}" == *"repo view"* ]]; then printf 'main'
+		fi
+		return 0
+	}
+
+	local released_reason="" fast_fail_called=0
+	_release_dispatch_claim() { released_reason="$2"; return 0; }
+	_report_failure_to_fast_fail() { fast_fail_called=1; return 0; }
+	_update_dispatch_ledger() { return 0; }
+	_release_session_lock() { return 0; }
+	_increment_orphan_count_stat() { return 0; }
+
+	_cmd_run_finish "issue-99999" "complete" "$work_dir"
+
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+	unset -f gh 2>/dev/null || true
+
+	if [[ "$released_reason" == "worker_complete" ]]; then
+		print_result "_cmd_run_finish emits worker_complete after successful orphan recovery" 0
+	else
+		print_result "_cmd_run_finish emits worker_complete after successful orphan recovery" 1 \
+			"Expected worker_complete (PR auto-created), got '${released_reason}'"
+	fi
+	return 0
+}
+
+test_cmd_run_finish_local_unpushed_pushes_and_recovers_pr() {
+	local work_dir="${TEST_ROOT}/repo-finish-local-unpushed-ok"
+	_setup_test_git_repo "$work_dir" 1
+	DISPATCH_REPO_SLUG="test-owner/test-repo"
+
+	local gh_head="" gh_base="" gh_called=0
+	gh() {
+		local arg=""
+		for arg in "$@"; do
+			case "$_last_flag" in
+			"--head") gh_head="$arg" ;;
+			"--base") gh_base="$arg" ;;
+			esac
+			_last_flag="$arg"
+		done
+		if [[ "${*}" == *"pr list"* ]]; then printf '0'
+		elif [[ "${*}" == *"issue view"* ]]; then printf 'OPEN'
+		elif [[ "${*}" == *"repo view"* ]]; then printf 'main'
+		elif [[ "${*}" == *"pr create"* ]]; then gh_called=1
+		fi
+		return 0
+	}
+	_last_flag=""
+
+	local released_reason="" fast_fail_called=0
+	_release_dispatch_claim() { released_reason="$2"; return 0; }
+	_report_failure_to_fast_fail() { fast_fail_called=1; return 0; }
+	_update_dispatch_ledger() { return 0; }
+	_release_session_lock() { return 0; }
+	_increment_orphan_count_stat() { return 0; }
+
+	_cmd_run_finish "issue-99999" "complete" "$work_dir"
+
+	local remote_ref=""
+	remote_ref=$(git -C "$work_dir" ls-remote origin "refs/heads/feature/auto-test-issue-99999" 2>/dev/null || true)
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+	unset -f gh 2>/dev/null || true
+
+	if [[ "$released_reason" == "worker_complete" && "$gh_called" -eq 1 && -n "$remote_ref" ]]; then
+		print_result "_cmd_run_finish pushes local branch and recovers PR" 0
+	else
+		print_result "_cmd_run_finish pushes local branch and recovers PR" 1 \
+			"Expected worker_complete, gh pr create, and remote ref; got reason='${released_reason}' gh_called=${gh_called} remote_ref='${remote_ref}'"
+	fi
+
+	if [[ "$gh_head" == "feature/auto-test-issue-99999" && "$gh_base" == "main" ]]; then
+		print_result "local unpushed recovery creates PR from pushed branch against base" 0
+	else
+		print_result "local unpushed recovery creates PR from pushed branch against base" 1 \
+			"Expected head feature/auto-test-issue-99999 base main, got head='${gh_head}' base='${gh_base}'"
+	fi
+	return 0
+}
+
+test_handle_worker_branch_orphan_empty_branch_existing_pr_releases_complete() {
+	local work_dir="${TEST_ROOT}/repo-finish-orphan-cleaned"
+	mkdir -p "$work_dir"
+	DISPATCH_REPO_SLUG="test-owner/test-repo"
+
+	# Stub gh: empty branch skips --head and falls back to issue search; existing PR found.
+	gh() {
+		if [[ "${*}" == *"pr list"* && "${*}" == *"--search 99999"* ]]; then
+			printf '1'
+			return 0
+		fi
+		printf '0'
+		return 0
+	}
+
+	local released_reason=""
+	_release_dispatch_claim() { released_reason="$2"; return 0; }
+	_increment_orphan_count_stat() { return 0; }
+
+	_handle_worker_branch_orphan "issue-99999" "$work_dir"
+
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+	unset -f gh 2>/dev/null || true
+
+	if [[ "$released_reason" == "worker_complete" ]]; then
+		print_result "_handle_worker_branch_orphan treats empty-branch existing PR as complete" 0
+	else
+		print_result "_handle_worker_branch_orphan treats empty-branch existing PR as complete" 1 \
+			"Expected worker_complete (existing PR found by issue search), got '${released_reason}'"
+	fi
+	return 0
+}
+
+# AC#4: on auto-PR failure, _cmd_run_finish emits worker_branch_orphan
+test_cmd_run_finish_orphan_recovery_failure_emits_branch_orphan() {
+	local work_dir="${TEST_ROOT}/repo-finish-orphan-fail"
+	_setup_test_git_repo "$work_dir" 1
+	git -C "$work_dir" push -q origin "feature/auto-test-issue-99999"
+	DISPATCH_REPO_SLUG="test-owner/test-repo"
+	MAESTRO_PR_BASE_BRANCH="develop"
+
+	# Stub gh: pr list returns 0, issue view = OPEN, pr create FAILS
+	local posted_body=""
+	gh() {
+		if [[ "${1:-}" == "api" ]]; then
+			local arg=""
+			for arg in "$@"; do
+				if [[ "$arg" == body=* ]]; then
+					posted_body="${arg#body=}"
+				fi
+			done
+			return 0
+		elif [[ "${*}" == *"pr list"* ]]; then
+			printf '0'
+			return 0
+		elif [[ "${*}" == *"issue view"* ]]; then
+			printf 'OPEN'
+			return 0
+		elif [[ "${*}" == *"repo view"* ]]; then
+			printf 'main'
+			return 0
+		elif [[ "${*}" == *"pr create"* ]]; then
+			return 1  # Simulate pr create failure
+		fi
+		return 0
+	}
+
+	local released_reason="" fast_fail_called=0
+	_release_dispatch_claim() { released_reason="$2"; return 0; }
+	_report_failure_to_fast_fail() { fast_fail_called=1; return 0; }
+	_update_dispatch_ledger() { return 0; }
+	_release_session_lock() { return 0; }
+	_increment_orphan_count_stat() { return 0; }
+
+	_cmd_run_finish "issue-99999" "complete" "$work_dir"
+
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+	unset MAESTRO_PR_BASE_BRANCH 2>/dev/null || true
+	unset -f gh 2>/dev/null || true
+
+	if [[ "$released_reason" == "worker_branch_orphan" ]]; then
+		print_result "_cmd_run_finish emits worker_branch_orphan when PR creation fails" 0
+	else
+		print_result "_cmd_run_finish emits worker_branch_orphan when PR creation fails" 1 \
+			"Expected worker_branch_orphan (PR create failed), got '${released_reason}'"
+	fi
+
+	if [[ "$posted_body" == *"gh pr create --head feature/auto-test-issue-99999 --base develop --repo test-owner/test-repo"* ]]; then
+		print_result "worker_branch_orphan comment uses configured PR base" 0
+	else
+		print_result "worker_branch_orphan comment uses configured PR base" 1 \
+			"Expected orphan recovery comment with --base develop, got '${posted_body}'"
+	fi
+	return 0
+}
+
+test_cmd_run_finish_local_unpushed_push_failure_emits_distinct_reason() {
+	local work_dir="${TEST_ROOT}/repo-finish-local-unpushed-fail"
+	_setup_test_git_repo "$work_dir" 1
+	git -C "$work_dir" remote set-url origin "${TEST_ROOT}/missing-remote.git"
+	DISPATCH_REPO_SLUG="test-owner/test-repo"
+	MAESTRO_PR_BASE_BRANCH="develop"
+
+	local posted_body=""
+	gh() {
+		if [[ "${1:-}" == "api" ]]; then
+			local arg=""
+			for arg in "$@"; do
+				if [[ "$arg" == body=* ]]; then
+					posted_body="${arg#body=}"
+				fi
+			done
+			return 0
+		elif [[ "${*}" == *"pr list"* ]]; then
+			printf '0'
+			return 0
+		elif [[ "${*}" == *"issue view"* ]]; then
+			printf 'OPEN'
+			return 0
+		elif [[ "${*}" == *"repo view"* ]]; then
+			printf 'main'
+			return 0
+		fi
+		return 0
+	}
+
+	local released_reason="" fast_fail_called=0
+	_release_dispatch_claim() { released_reason="$2"; return 0; }
+	_report_failure_to_fast_fail() { fast_fail_called=1; return 0; }
+	_update_dispatch_ledger() { return 0; }
+	_release_session_lock() { return 0; }
+	_increment_orphan_count_stat() { return 0; }
+
+	_cmd_run_finish "issue-99999" "complete" "$work_dir"
+
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+	unset MAESTRO_PR_BASE_BRANCH 2>/dev/null || true
+	unset -f gh 2>/dev/null || true
+
+	if [[ "$released_reason" == "worker_local_branch_unpushed" ]]; then
+		print_result "_cmd_run_finish emits worker_local_branch_unpushed when local push recovery fails" 0
+	else
+		print_result "_cmd_run_finish emits worker_local_branch_unpushed when local push recovery fails" 1 \
+			"Expected worker_local_branch_unpushed, got '${released_reason}'"
+	fi
+
+	local expected_push_ref="HE""AD:feature/auto-test-issue-99999"
+	if [[ "$posted_body" == *"WORKER_LOCAL_BRANCH_UNPUSHED"* && "$posted_body" == *"git -C ${work_dir} push origin ${expected_push_ref}"* ]]; then
+		print_result "local unpushed failure comment is distinct and includes push recovery" 0
+	else
+		print_result "local unpushed failure comment is distinct and includes push recovery" 1 \
+			"Expected local-unpushed recovery comment, got '${posted_body}'"
+	fi
+	return 0
+}
+
+test_cmd_run_finish_fail_recovers_branch_orphan_output() {
+	local work_dir="${TEST_ROOT}/repo-fail-orphan-ok"
+	local released_reason="" fast_fail_called=0
+	_setup_test_git_repo "$work_dir" 1
+	git -C "$work_dir" push -q origin "feature/auto-test-issue-99999"
+	DISPATCH_REPO_SLUG="test-owner/test-repo"
+	gh() {
+		if [[ "${*}" == *"pr list"* ]]; then printf '0'
+		elif [[ "${*}" == *"issue view"* ]]; then printf 'OPEN'
+		elif [[ "${*}" == *"repo view"* ]]; then printf 'main'
+		fi
+		return 0
+	}
+	_release_dispatch_claim() { released_reason="$2"; return 0; }
+	_report_failure_to_fast_fail() { fast_fail_called=1; return 0; }
+	_update_dispatch_ledger() { return 0; }
+	_release_session_lock() { return 0; }
+	_increment_orphan_count_stat() { return 0; }
+	_cmd_run_finish "issue-99999" "fail" "$work_dir"
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+	unset -f gh 2>/dev/null || true
+	if [[ "$released_reason" == "worker_complete" && "$fast_fail_called" -eq 0 ]]; then
+		print_result "_cmd_run_finish fail recovers branch-orphan output" 0
+	else
+		print_result "_cmd_run_finish fail recovers branch-orphan output" 1 \
+			"Expected worker_complete and no fast-fail, got reason='${released_reason}' fast_fail=${fast_fail_called}"
+	fi
+	return 0
+}
+
+test_cmd_run_finish_fail_closed_issue_without_merged_pr_fails() {
+	local work_dir="${TEST_ROOT}/repo-fail-issue-closed"
+	local released_reason="" fast_fail_called=0
+	_setup_test_git_repo "$work_dir" 0
+	DISPATCH_REPO_SLUG="test-owner/test-repo"
+	gh() {
+		if [[ "${*}" == *"issue view"* ]]; then printf 'CLOSED'
+		elif [[ "${*}" == *"pr list"* ]]; then printf ''
+		fi
+		return 0
+	}
+	_release_dispatch_claim() { released_reason="$2"; return 0; }
+	_report_failure_to_fast_fail() { fast_fail_called=1; return 0; }
+	_update_dispatch_ledger() { return 0; }
+	_release_session_lock() { return 0; }
+	_increment_orphan_count_stat() { return 0; }
+
+	_cmd_run_finish "issue-99999" "fail" "$work_dir"
+
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+	unset -f gh 2>/dev/null || true
+	if [[ "$released_reason" == "worker_failed" && "$fast_fail_called" -eq 1 ]]; then
+		print_result "_cmd_run_finish fail requires merged PR beyond closed issue" 0
+	else
+		print_result "_cmd_run_finish fail requires merged PR beyond closed issue" 1 \
+			"Expected worker_failed and fast-fail, got reason='${released_reason}' fast_fail=${fast_fail_called}"
+	fi
+	return 0
+}
+
+test_cmd_run_finish_fail_existing_pr_recovery_remains_complete() {
+	local work_dir="${TEST_ROOT}/repo-fail-pr-merged"
+	local released_reason="" fast_fail_called=0
+	_setup_test_git_repo "$work_dir" 1
+	DISPATCH_REPO_SLUG="test-owner/test-repo"
+	gh() {
+		if [[ "${*}" == *"issue view"* ]]; then printf 'OPEN'
+		elif [[ "${*}" == *"pr list"* && "${*}" == *"--state merged"* ]]; then printf '1'
+		else printf '0'
+		fi
+		return 0
+	}
+	_release_dispatch_claim() { released_reason="$2"; return 0; }
+	_report_failure_to_fast_fail() { fast_fail_called=1; return 0; }
+	_update_dispatch_ledger() { return 0; }
+	_release_session_lock() { return 0; }
+	_increment_orphan_count_stat() { return 0; }
+
+	_cmd_run_finish "issue-99999" "fail" "$work_dir"
+
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+	unset -f gh 2>/dev/null || true
+	if [[ "$released_reason" == "worker_complete" && "$fast_fail_called" -eq 0 ]]; then
+		print_result "_cmd_run_finish fail still recovers existing PR for open issue" 0
+	else
+		print_result "_cmd_run_finish fail still recovers existing PR for open issue" 1 \
+			"Expected worker_complete and no fast-fail, got reason='${released_reason}' fast_fail=${fast_fail_called}"
+	fi
+	return 0
+}
+
+test_cmd_run_finish_fail_confirmed_terminal_state_releases_complete() {
+	local work_dir="${TEST_ROOT}/repo-fail-terminal-complete"
+	local released_reason="" fast_fail_called=0
+	_setup_test_git_repo "$work_dir" 1
+	DISPATCH_REPO_SLUG="test-owner/test-repo"
+	gh() {
+		if [[ "${*}" == *"issue view"* ]]; then printf 'CLOSED'
+		elif [[ "${*}" == *"pr list"* && "${*}" == *"--head"* && "${*}" == *"--state merged"* ]]; then printf '123'
+		elif [[ "${*}" == *"pr list"* && "${*}" == *"--search"* && "${*}" == *"--state merged"* ]]; then printf '123'
+		fi
+		return 0
+	}
+	_release_dispatch_claim() { released_reason="$2"; return 0; }
+	_report_failure_to_fast_fail() { fast_fail_called=1; return 0; }
+	_update_dispatch_ledger() { return 0; }
+	_release_session_lock() { return 0; }
+	_increment_orphan_count_stat() { return 0; }
+
+	_cmd_run_finish "issue-99999" "fail" "$work_dir"
+
+	unset DISPATCH_REPO_SLUG 2>/dev/null || true
+	unset -f gh 2>/dev/null || true
+	if [[ "$released_reason" == "worker_complete" && "$fast_fail_called" -eq 0 ]]; then
+		print_result "_cmd_run_finish fail treats confirmed terminal GitHub state as complete" 0
+	else
+		print_result "_cmd_run_finish fail treats confirmed terminal GitHub state as complete" 1 \
+			"Expected worker_complete and no fast-fail, got reason='${released_reason}' fast_fail=${fast_fail_called}"
+	fi
+	return 0
+}
+
+main() {
+	setup_test_env
+	test_appends_escalation_contract
+	test_non_full_loop_prompt_unchanged
+	test_headless_contract_uses_deployed_framework_paths
+	test_parse_initial_model_does_not_set_explicit_override
+	test_startup_no_activity_timeout_returns_watchdog_continue
+	test_startup_no_activity_can_rotate_after_continuation_budget
+	test_sigkill_with_activity_attempts_continuation
+	test_sigterm_with_local_kill_reason_does_not_resume_as_provider_drop
+	test_handle_run_result_tolerates_empty_or_non_numeric_exit_code
+	test_dispatcher_initial_model_can_rotate_after_rate_limit
+	test_explicit_model_override_remains_pinned_on_rate_limit
+	test_issue_worker_env_contract_rejects_missing_env
+	test_issue_worker_env_contract_rejects_missing_worktree
+	test_issue_worker_env_contract_accepts_valid_precreated_worktree
+	test_worker_worktree_claim_transfers_to_runtime_pid
+	test_worker_worktree_claim_reclaims_stale_live_same_task_owner
+	test_worker_worktree_claim_reclaims_dispatch_precreate_owner
+	test_worker_worktree_clean_without_upstream_blocks_local_commits
+	test_worker_worktree_claim_classifies_unreclaimed_live_owner
+	test_deleted_cwd_recovery_uses_worker_worktree
+	test_cmd_run_aborts_issue_worker_before_canary_when_env_missing
+	test_cmd_run_preserves_worker_origin_overrides_before_canary
+	test_deleted_launch_cwd_recovers_to_work_dir
+	test_does_not_double_append
+	test_extract_session_id_from_output_returns_latest_session_id
+	test_provider_sessions_scope_issue_keys_by_repo_slug
+	test_provider_sessions_keep_pulse_unscoped
+	test_blocked_completion_records_blocked_label
+	test_missing_context_blocked_requests_brief_recovery
+	test_headless_activity_timeout_default_matches_watchdog
+	test_activity_watchdog_classifiers_detect_rate_limit_and_ci_wait
+	test_failure_classifier_records_provenance
+	test_failure_classifier_distinguishes_quota_exhaustion
+	test_failure_classifier_distinguishes_anthropic_credit_exhaustion
+	test_service_interruption_candidate_uses_separate_path
+	test_service_interruption_exhausted_metric_preserves_context
+	test_canary_pins_vanilla_agent_with_isolated_plugin_config
+	test_opencode_session_env_wrapper_strips_session_vars_only
+	test_worker_opencode_exec_paths_strip_session_env
+	test_worker_opencode_invocation_seeds_continuation_session
+	test_sandbox_passthrough_scopes_provider_env
+	test_copy_scoped_opencode_auth_keeps_selected_provider_only
+	test_seed_worker_db_session_context_copies_only_selected_session
+	test_seed_worker_db_session_context_copies_migration_metadata
+	test_seed_worker_db_session_context_uses_backup_for_fresh_db
+	test_seed_worker_db_session_context_vacuums_pruned_backup
+	test_sync_worker_db_migration_metadata_repairs_prewarmed_project_table
+	test_sync_worker_db_migration_metadata_replaces_stale_ledgers
+	test_copy_worker_db_migration_ledger_preserves_rows_when_attach_fails
+	test_copy_worker_db_migration_ledger_stops_when_schema_query_fails
+	test_sync_worker_db_migration_metadata_archives_unrepairable_project_table
+	test_sync_worker_db_migration_metadata_preserves_worker_db_when_shared_query_fails
+	test_sync_worker_db_migration_metadata_repeated_launch_reaches_seed
+	test_opencode_project_table_migration_replay_detected
+	test_large_opencode_prompt_uses_file_attachment
+	test_large_claude_prompt_uses_stdin_file
+	test_registered_prompt_temp_cleanup_removes_dir
+	test_worker_produced_output_no_commits_returns_noop
+	test_worker_produced_output_with_commits_returns_pr_exists_failopen
+	test_worker_produced_output_non_worker_session_returns_pr_exists
+	test_worker_produced_output_invalid_workdir_returns_pr_exists
+	test_worker_produced_output_pushed_branch_no_slug_returns_pr_exists
+	test_worker_produced_output_branch_no_pr_returns_branch_orphan
+	test_worker_produced_output_local_branch_no_remote_returns_local_branch_unpushed
+	test_worker_produced_output_branch_with_pr_returns_pr_exists
+	test_cmd_run_finish_emits_noop_for_zero_output
+	test_cmd_run_finish_emits_complete_for_real_output
+	test_cmd_run_finish_emits_complete_when_no_workdir
+	test_attempt_orphan_recovery_pr_calls_gh_create
+	test_ensure_orphan_recovery_rejects_empty_branch
+	test_build_orphan_recovery_pr_body_tolerates_missing_publish_flag
+	test_cmd_run_finish_orphan_recovery_success_emits_worker_complete
+	test_cmd_run_finish_local_unpushed_pushes_and_recovers_pr
+	test_handle_worker_branch_orphan_empty_branch_existing_pr_releases_complete
+	test_cmd_run_finish_orphan_recovery_failure_emits_branch_orphan
+	test_cmd_run_finish_local_unpushed_push_failure_emits_distinct_reason
+	test_cmd_run_finish_fail_recovers_branch_orphan_output
+	test_cmd_run_finish_fail_closed_issue_without_merged_pr_fails
+	test_cmd_run_finish_fail_existing_pr_recovery_remains_complete
+	test_cmd_run_finish_fail_confirmed_terminal_state_releases_complete
+	teardown_test_env
+	printf '\nTests run: %d\n' "$TESTS_RUN"
+	printf 'Failures: %d\n' "$TESTS_FAILED"
+
+	if [[ "$TESTS_FAILED" -eq 0 ]]; then
+		return 0
+	fi
+
+	return 1
+}
+
+main "$@"

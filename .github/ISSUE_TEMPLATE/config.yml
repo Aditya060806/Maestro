@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report via /log-issue-maestro (recommended)
+    url: https://github.com/Aditya060806/Maestro#readme
+    about: |
+      The best way to report issues is via /log-issue-maestro in your AI assistant session.
+      It gathers diagnostics automatically, checks for duplicates, and produces structured reports.
+      See the README for setup instructions.
+  - name: Ask a question
+    url: https://github.com/Aditya060806/Maestro/discussions
+    about: Use Discussions for questions, ideas, and general help.

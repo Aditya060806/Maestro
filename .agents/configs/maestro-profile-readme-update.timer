@@ -1,0 +1,18 @@
+# systemd user timer for profile README auto-update — runs hourly
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp maestro-profile-readme-update.service ~/.config/systemd/user/
+#   cp maestro-profile-readme-update.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now maestro-profile-readme-update.timer
+
+[Unit]
+Description=maestro profile README update timer (hourly)
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

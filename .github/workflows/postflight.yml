@@ -1,0 +1,301 @@
+name: Postflight Verification
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to verify (leave empty for latest)'
+        required: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.tag || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  postflight:
+    name: Verify Release Health
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    permissions:
+      contents: read
+      checks: read
+      security-events: read
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      with:
+        ref: ${{ github.event.inputs.tag || github.ref }}
+        fetch-depth: 0
+    
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
+      with:
+        bun-version: latest
+    
+    - name: Wait for CI/CD Pipelines
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        REPO: ${{ github.repository }}
+        COMMIT_SHA: ${{ github.sha }}
+      run: |
+        echo "Waiting for all check runs to complete..."
+        echo "Note: Excluding this workflow (Verify Release Health) to avoid circular dependency"
+        sleep 60  # Initial wait for workflows to start
+        
+        # Poll for completion, excluding this workflow to avoid circular dependency
+        SELF_NAME="Verify Release Health"
+        for i in {1..20}; do
+          PENDING=$(gh api "repos/${REPO}/commits/${COMMIT_SHA}/check-runs" \
+            --jq "[.check_runs[] | select(.status != \"completed\" and .name != \"$SELF_NAME\")] | length")
+          
+          if [[ "$PENDING" == "0" ]]; then
+            echo "All check runs completed (excluding self)"
+            break
+          fi
+          
+          # Show which workflows are still pending
+          echo "Waiting for $PENDING check runs... (attempt $i/20)"
+          gh api "repos/${REPO}/commits/${COMMIT_SHA}/check-runs" \
+            --jq ".check_runs[] | select(.status != \"completed\" and .name != \"$SELF_NAME\") | \"  - \(.name): \(.status)\"" || true
+          sleep 30
+        done
+    
+    - name: Verify CI/CD Status
+      id: cicd
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        REPO: ${{ github.repository }}
+        COMMIT_SHA: ${{ github.sha }}
+      run: |
+        echo "## CI/CD Pipeline Status" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Get all check runs, excluding self to avoid counting our own status
+        SELF_NAME="Verify Release Health"
+        CHECK_RUNS=$(gh api "repos/${REPO}/commits/${COMMIT_SHA}/check-runs" \
+          --jq ".check_runs[] | select(.name != \"$SELF_NAME\") | {name, status, conclusion}")
+        
+        # Count results (excluding self)
+        TOTAL=$(echo "$CHECK_RUNS" | jq -s 'length')
+        PASSED=$(echo "$CHECK_RUNS" | jq -s '[.[] | select(.conclusion == "success")] | length')
+        SKIPPED=$(echo "$CHECK_RUNS" | jq -s '[.[] | select(.conclusion == "skipped")] | length')
+        FAILED=$(echo "$CHECK_RUNS" | jq -s '[.[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required")] | length')
+        
+        echo "| Check | Status | Conclusion |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|--------|------------|" >> $GITHUB_STEP_SUMMARY
+        
+        # Show all check runs including self for transparency
+        gh api "repos/${REPO}/commits/${COMMIT_SHA}/check-runs" \
+          --jq '.check_runs[] | "| \(.name) | \(.status) | \(.conclusion // "pending") |"' >> $GITHUB_STEP_SUMMARY
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "*Note: 'Verify Release Health' (this workflow) is excluded from pass/fail counts*" >> $GITHUB_STEP_SUMMARY
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Total**: $TOTAL | **Passed**: $PASSED | **Skipped**: $SKIPPED | **Failed**: $FAILED" >> $GITHUB_STEP_SUMMARY
+        
+        # Separate critical workflow failures from advisory tool failures
+        # Critical: core CI checks (Security Validation, Framework Validation, Version Consistency)
+        # Advisory: external analysis tools that fail intermittently (non-blocking)
+        # Pipe-delimited list of exact check names to treat as advisory
+        ADVISORY_NAMES="SonarCloud Code Analysis"
+        
+        CRITICAL_FAILED=$(echo "$CHECK_RUNS" | jq -s --arg names "$ADVISORY_NAMES" \
+          '($names | split("|")) as $adv |
+           [.[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required") | select(.name as $n | $adv | index($n) | not)] | length')
+        ADVISORY_FAILED=$(echo "$CHECK_RUNS" | jq -s --arg names "$ADVISORY_NAMES" \
+          '($names | split("|")) as $adv |
+           [.[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required") | select(.name as $n | $adv | index($n))] | length')
+        
+        if [[ "$ADVISORY_FAILED" != "0" ]]; then
+          echo "::warning::$ADVISORY_FAILED advisory check(s) failed (non-blocking)"
+          echo "$CHECK_RUNS" | jq -rs --arg names "$ADVISORY_NAMES" \
+            '($names | split("|")) as $adv |
+             .[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required") | select(.name as $n | $adv | index($n)) | "  Advisory failure: \(.name) (\(.conclusion))"'
+        fi
+        
+        if [[ "$CRITICAL_FAILED" != "0" ]]; then
+          echo "::error::$CRITICAL_FAILED critical check run(s) failed"
+          echo "$CHECK_RUNS" | jq -rs --arg names "$ADVISORY_NAMES" \
+            '($names | split("|")) as $adv |
+             .[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required") | select(.name as $n | $adv | index($n) | not) | "  Critical failure: \(.name) (\(.conclusion))"'
+          echo "cicd_status=failed" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+        if [[ "$ADVISORY_FAILED" != "0" ]]; then
+          echo "cicd_status=warning" >> $GITHUB_OUTPUT
+        else
+          echo "cicd_status=passed" >> $GITHUB_OUTPUT
+        fi
+        echo "CI/CD critical checks passed"
+    
+    - name: Check SonarCloud Quality Gate
+      if: always()
+      id: sonarcloud
+      run: |
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## SonarCloud Analysis" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Get quality gate status
+        QG_RESPONSE=$(curl -s "https://sonarcloud.io/api/qualitygates/project_status?projectKey=Aditya060806_maestro")
+        STATUS=$(echo "$QG_RESPONSE" | jq -r '.projectStatus.status // "UNKNOWN"')
+        
+        echo "**Quality Gate**: $STATUS" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Get metrics
+        METRICS=$(curl -s "https://sonarcloud.io/api/measures/component?component=Aditya060806_maestro&metricKeys=bugs,vulnerabilities,code_smells,security_hotspots")
+        
+        echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "$METRICS" | jq -r '.component.measures[] | "| \(.metric) | \(.value) |"' >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+        
+        if [[ "$STATUS" == "ERROR" ]]; then
+          echo "::warning::SonarCloud quality gate failed"
+          echo "sonar_status=failed" >> $GITHUB_OUTPUT
+        elif [[ "$STATUS" == "OK" ]]; then
+          echo "sonar_status=passed" >> $GITHUB_OUTPUT
+        else
+          echo "sonar_status=unknown" >> $GITHUB_OUTPUT
+        fi
+      continue-on-error: true
+    
+    - name: Security Scan with Snyk
+      if: always()
+      id: snyk
+      run: |
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Security Scan (Snyk)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Install Snyk (Bun for faster install)
+        bun install -g snyk
+        
+        # Authenticate if token available
+        if [[ -n "$SNYK_TOKEN" ]]; then
+          snyk auth "$SNYK_TOKEN"
+          
+          # Run security scan
+          if snyk test --severity-threshold=high --json > snyk-results.json 2>/dev/null; then
+            echo "**Status**: No high/critical vulnerabilities found" >> $GITHUB_STEP_SUMMARY
+            echo "snyk_status=passed" >> $GITHUB_OUTPUT
+          else
+            VULN_COUNT=$(jq '.vulnerabilities | length // 0' snyk-results.json)
+            echo "**Status**: $VULN_COUNT vulnerabilities found" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Severity | Package | Title |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|---------|-------|" >> $GITHUB_STEP_SUMMARY
+            jq -r '.vulnerabilities[:5][] | "| \(.severity) | \(.packageName) | \(.title) |"' snyk-results.json >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+            echo "snyk_status=issues" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "**Status**: Skipped (SNYK_TOKEN not configured)" >> $GITHUB_STEP_SUMMARY
+          echo "snyk_status=skipped" >> $GITHUB_OUTPUT
+        fi
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      continue-on-error: true
+    
+    - name: Check for Secrets
+      if: always()
+      id: secrets
+      run: |
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Secret Detection (Secretlint)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Install the repo-pinned secretlint stack. Using the latest global
+        # secretlint can add release-only rules that trip intentional fixture
+        # strings before the repository has opted in to the new major version.
+        bun install --frozen-lockfile
+        
+        # Run scan. Keep intentional credential-scrubber fixtures out of the
+        # release gate while scanning every other production/source path.
+        SECRET_LINT_TARGETS=(
+          "**/*"
+          "!.agents/scripts/tests/test-credential-sanitizer.sh"
+          "!.agents/scripts/tests/test-credential-transcript-scrub.sh"
+        )
+        if bunx --no-install secretlint "${SECRET_LINT_TARGETS[@]}" --secretlintrc .secretlintrc.json --secretlintignore .secretlintignore --format compact 2>/dev/null; then
+          echo "**Status**: No secrets detected" >> $GITHUB_STEP_SUMMARY
+          echo "secrets_status=passed" >> $GITHUB_OUTPUT
+        else
+          echo "**Status**: Potential secrets detected" >> $GITHUB_STEP_SUMMARY
+          echo "::error::Potential secrets detected in codebase"
+          echo "secrets_status=failed" >> $GITHUB_OUTPUT
+        fi
+      continue-on-error: true
+    
+    - name: Generate Final Report
+      id: report
+      if: always()
+      env:
+        CICD_STATUS: ${{ steps.cicd.outputs.cicd_status }}
+        SONAR_STATUS: ${{ steps.sonarcloud.outputs.sonar_status }}
+        SNYK_STATUS: ${{ steps.snyk.outputs.snyk_status }}
+        SECRETS_STATUS: ${{ steps.secrets.outputs.secrets_status }}
+        RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
+        COMMIT_SHA: ${{ github.sha }}
+      run: |
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "---" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Postflight Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Default unset outputs to 'skipped' (step didn't produce output)
+        CICD="${CICD_STATUS:-skipped}"
+        SONAR="${SONAR_STATUS:-skipped}"
+        SNYK="${SNYK_STATUS:-skipped}"
+        SECRETS="${SECRETS_STATUS:-skipped}"
+        
+        echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| CI/CD Pipelines | ${CICD} |" >> $GITHUB_STEP_SUMMARY
+        echo "| SonarCloud | ${SONAR} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Snyk Security | ${SNYK} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Secret Detection | ${SECRETS} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Release**: ${RELEASE_TAG}" >> $GITHUB_STEP_SUMMARY
+        echo "**Commit**: ${COMMIT_SHA}" >> $GITHUB_STEP_SUMMARY
+        echo "**Time**: $(date -u)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "*Generated by Maestro Framework Postflight Verification*" >> $GITHUB_STEP_SUMMARY
+        
+        # Determine overall result
+        # Critical failures: CI/CD hard failures or secrets detected
+        HAS_CRITICAL=false
+        HAS_WARNING=false
+        
+        if [[ "$CICD" == "failed" ]]; then
+          HAS_CRITICAL=true
+        fi
+        if [[ "$SECRETS" == "failed" ]]; then
+          HAS_CRITICAL=true
+        fi
+        
+        # Warnings: advisory failures, SonarCloud issues, Snyk issues
+        if [[ "$CICD" == "warning" || "$SONAR" == "failed" || "$SNYK" == "issues" ]]; then
+          HAS_WARNING=true
+        fi
+        
+        if [[ "$HAS_CRITICAL" == "true" ]]; then
+          echo "::error::Postflight verification failed for release ${RELEASE_TAG}"
+          echo ""
+          echo "Recommended actions:"
+          echo "1. Review the failed checks in the workflow summary"
+          echo "2. If critical issues found, consider rollback"
+          echo "3. See: .agents/workflows/postflight.md#rollback-procedures"
+          exit 1
+        elif [[ "$HAS_WARNING" == "true" ]]; then
+          echo "::warning::Postflight completed with warnings for release ${RELEASE_TAG}"
+          echo "Review advisory warnings above and address in next release if needed."
+        else
+          echo "Postflight verification passed for release ${RELEASE_TAG}"
+        fi

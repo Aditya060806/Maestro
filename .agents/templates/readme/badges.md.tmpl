@@ -1,0 +1,13 @@
+<!-- Build & Quality Status -->
+{{?HAS_ACTIONS_WORKFLOW}}[![GitHub Actions](https://github.com/{{SLUG}}/actions/workflows/{{ACTIONS_WORKFLOW_FILE}}/badge.svg?branch={{DEFAULT_BRANCH}})](https://github.com/{{SLUG}}/actions/workflows/{{ACTIONS_WORKFLOW_FILE}})
+
+<!-- License & Legal -->
+{{?HAS_LICENSE}}[![License](https://img.shields.io/badge/license-see%20file-yellow.svg)](https://github.com/{{SLUG}}/blob/{{DEFAULT_BRANCH}}/LICENSE)
+
+<!-- Repository Metrics -->
+{{?HAS_REPO_METRICS}}[![Lines of code](docs/metrics/badges/loc.svg)](docs/metrics/repo-metrics.md)
+{{?HAS_REPO_METRICS}}[![Languages by lines of code](docs/metrics/badges/languages.svg)](docs/metrics/repo-metrics.md)
+{{?HAS_REPO_METRICS}}[![Dependencies](docs/metrics/badges/dependencies.svg)](docs/metrics/repo-metrics.md)
+
+<!-- Project Links -->
+[![GitHub repository](https://img.shields.io/badge/github-repository-181717.svg?logo=github)](https://github.com/{{SLUG}})

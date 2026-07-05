@@ -1,0 +1,26 @@
+# systemd user service for profile README auto-update (Linux equivalent of launchd plist)
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp maestro-profile-readme-update.service ~/.config/systemd/user/
+#   cp maestro-profile-readme-update.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now maestro-profile-readme-update.timer
+#
+# Check status:
+#   systemctl --user status maestro-profile-readme-update.timer
+#   journalctl --user -u maestro-profile-readme-update.service
+
+[Unit]
+Description=maestro profile README stats update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.maestro/agents/scripts/profile-readme-helper.sh update
+StandardOutput=append:%h/.maestro/.agent-workspace/logs/profile-readme-update.log
+StandardError=append:%h/.maestro/.agent-workspace/logs/profile-readme-update.log
+
+[Install]
+WantedBy=default.target

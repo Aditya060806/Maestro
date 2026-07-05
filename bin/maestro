@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Maestro Framework CLI wrapper
+# This wrapper handles npm/brew/bun global installs and local development.
+#
+# Priority order (highest to lowest):
+#   1. ~/Git/maestro/maestro.sh  — git repo, always current via 'maestro update'
+#   2. Auto-clone the git repo     — first-run bootstrap for package manager installs
+#   3. npm-bundled maestro.sh     — snapshot at npm publish time, may be stale
+#
+# The repo copy is preferred so that 'maestro update' (git pull) immediately
+# takes effect without requiring 'npm update -g maestro'.
+
+set -euo pipefail
+
+REPO_DIR="$HOME/Git/maestro"
+REPO_URL="https://github.com/Aditya060806/Maestro.git"
+
+# 1. Prefer the git repo copy — always current via 'maestro update'
+if [[ -f "$REPO_DIR/maestro.sh" ]]; then
+    exec bash "$REPO_DIR/maestro.sh" "$@"
+fi
+
+# 2. Git repo not found — bootstrap it automatically
+# This runs once on first use after a package manager install (npm/brew/bun).
+# After this, step 1 will always match and the git repo runs directly.
+if command -v git >/dev/null 2>&1; then
+    echo "[maestro] First run — cloning git repo to $REPO_DIR for transparent updates..."
+    mkdir -p "$(dirname "$REPO_DIR")"
+    if git clone "$REPO_URL" "$REPO_DIR" 2>/dev/null; then
+        echo "[maestro] Running setup..."
+        if [[ -f "$REPO_DIR/setup.sh" ]]; then
+            bash "$REPO_DIR/setup.sh" --non-interactive
+        fi
+        echo ""
+        echo "[maestro] Setup complete. The git repo at $REPO_DIR is now your canonical install."
+        echo "[maestro] Run 'maestro update' to stay current. You can safely remove the"
+        echo "[maestro] package manager copy (npm/brew/bun) — it's no longer needed."
+        echo ""
+        exec bash "$REPO_DIR/maestro.sh" "$@"
+    else
+        echo "[maestro] Git clone failed — falling back to bundled copy." >&2
+    fi
+fi
+
+# 3. Fall back to the npm-bundled copy (resolve symlinks first)
+# npm install -g creates a symlink: /usr/local/bin/maestro -> .../node_modules/maestro/bin/maestro
+# BASH_SOURCE[0] returns the symlink path, not the target, so we must resolve it
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+    DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+
+if [[ -f "$SCRIPT_DIR/../maestro.sh" ]]; then
+    exec bash "$SCRIPT_DIR/../maestro.sh" "$@"
+fi
+
+echo "Error: maestro.sh not found"
+echo "Please run: bash <(curl -fsSL https://maestro.sh/install)"
+exit 1

@@ -1,0 +1,1734 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest
+
+# Maestro Framework CLI
+# Usage: maestro <command> [options]
+#
+# Version: 3.31.53
+
+set -euo pipefail
+
+# Colors for output
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# Paths
+# When running under sudo, env_reset may rewrite HOME to root's home; SUDO_USER
+# holds the original username. getent passwd is canonical on Linux; dscl is
+# canonical on macOS. Fall back to $HOME only when those resolvers are absent.
+# The command -v getent guard MUST be present — omitting it crashes maestro.sh
+# under `set -euo pipefail` on any BSD system and breaks sudo maestro approve.
+# Mirrors the pattern in .agents/scripts/approval-helper.sh:_resolve_real_home().
+# Security: no escalation — root already has full filesystem access.
+_MAESTRO_REAL_HOME="$HOME"
+if [[ -n "${SUDO_USER:-}" && "$(id -u)" -eq 0 ]]; then
+	_tmp_real_home=""
+	if command -v getent &>/dev/null; then
+		_tmp_real_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+	elif command -v dscl &>/dev/null; then
+		_tmp_real_home=$(dscl . -read "/Users/${SUDO_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2; exit}' || true)
+	elif [[ -d "/Users/${SUDO_USER}" ]]; then
+		_tmp_real_home="/Users/${SUDO_USER}"
+	fi
+	if [[ -n "$_tmp_real_home" ]]; then
+		_MAESTRO_REAL_HOME="$_tmp_real_home"
+	fi
+fi
+INSTALL_DIR="$_MAESTRO_REAL_HOME/Git/maestro"
+_MAESTRO_SOURCE_PATH="${BASH_SOURCE[0]}"
+_MAESTRO_SOURCE_DIR="${_MAESTRO_SOURCE_PATH%/*}"
+[[ "$_MAESTRO_SOURCE_DIR" == "$_MAESTRO_SOURCE_PATH" ]] && _MAESTRO_SOURCE_DIR="."
+_MAESTRO_SOURCE_DIR="$(cd "$_MAESTRO_SOURCE_DIR" 2>/dev/null && pwd)" || _MAESTRO_SOURCE_DIR=""
+if [[ -n "$_MAESTRO_SOURCE_DIR" && -L "$_MAESTRO_SOURCE_PATH" ]]; then
+	_MAESTRO_LINK_TARGET="$(readlink "$_MAESTRO_SOURCE_PATH" 2>/dev/null || true)"
+	if [[ -n "$_MAESTRO_LINK_TARGET" ]]; then
+		[[ "$_MAESTRO_LINK_TARGET" != /* ]] && _MAESTRO_LINK_TARGET="$_MAESTRO_SOURCE_DIR/$_MAESTRO_LINK_TARGET"
+		_MAESTRO_LINK_DIR="${_MAESTRO_LINK_TARGET%/*}"
+		_MAESTRO_LINK_DIR="$(cd "$_MAESTRO_LINK_DIR" 2>/dev/null && pwd)" || _MAESTRO_LINK_DIR=""
+		[[ -n "$_MAESTRO_LINK_DIR" ]] && _MAESTRO_SOURCE_DIR="$_MAESTRO_LINK_DIR"
+	fi
+fi
+if [[ -n "$_MAESTRO_SOURCE_DIR" && -f "$_MAESTRO_SOURCE_DIR/.agents/scripts/maestro-cli/maestro-repos-lib.sh" ]]; then
+	INSTALL_DIR="$_MAESTRO_SOURCE_DIR"
+fi
+unset _MAESTRO_SOURCE_PATH _MAESTRO_SOURCE_DIR _MAESTRO_LINK_TARGET _MAESTRO_LINK_DIR
+AGENTS_DIR="$_MAESTRO_REAL_HOME/.maestro/agents"
+CONFIG_DIR="$_MAESTRO_REAL_HOME/.config/maestro"
+REPOS_FILE="$CONFIG_DIR/repos.json"
+# shellcheck disable=SC2034  # Used in fresh install fallback
+REPO_URL="https://github.com/Aditya060806/Maestro.git"
+VERSION_FILE="$INSTALL_DIR/VERSION"
+
+# Portable sed in-place edit (macOS BSD sed vs GNU sed)
+sed_inplace() { if [[ "$(uname)" == "Darwin" ]]; then sed -i '' "$@"; else sed -i "$@"; fi; }
+
+# Portable timeout (macOS has no coreutils timeout)
+_timeout_cmd() {
+	local secs="$1"
+	shift
+	if command -v timeout &>/dev/null; then
+		timeout "$secs" "$@"
+	elif command -v gtimeout &>/dev/null; then
+		gtimeout "$secs" "$@"
+	elif command -v perl &>/dev/null; then
+		perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+	else
+		echo "[WARN] No timeout command available - running without timeout" >&2
+		"$@"
+	fi
+}
+
+print_info() {
+	local msg="$1"
+	echo -e "${BLUE}[INFO]${NC} $msg"
+	return 0
+}
+print_success() {
+	local msg="$1"
+	echo -e "${GREEN}[OK]${NC} $msg"
+	return 0
+}
+print_warning() {
+	local msg="$1"
+	echo -e "${YELLOW}[WARN]${NC} $msg"
+	return 0
+}
+print_error() {
+	local msg="$1"
+	echo -e "${RED}[ERROR]${NC} $msg"
+	return 0
+}
+print_header() {
+	local msg="$1"
+	echo -e "${BOLD}${CYAN}$msg${NC}"
+	return 0
+}
+
+# Get current version
+get_version() {
+	if [[ -f "$VERSION_FILE" ]]; then
+		cat "$VERSION_FILE"
+	else
+		echo "unknown"
+	fi
+}
+
+# Get remote version
+get_remote_version() {
+	# Use GitHub API (not cached) instead of raw.githubusercontent.com (cached 5 min)
+	local version
+	if command -v jq &>/dev/null; then
+		version=$(curl -fsSL "https://api.github.com/repos/Aditya060806/Maestro/contents/VERSION" 2>/dev/null | jq -r '.content // empty' 2>/dev/null | base64 -d 2>/dev/null | tr -d '\n')
+		if [[ -n "$version" ]]; then
+			echo "$version"
+			return 0
+		fi
+	fi
+	# Fallback to raw (cached) if jq unavailable or API fails
+	curl -fsSL "https://raw.githubusercontent.com/Aditya060806/Maestro/main/VERSION" 2>/dev/null || echo "unknown"
+}
+
+get_public_release_tag() {
+	local repo="$1"
+	local tag=""
+
+	tag=$(_timeout_cmd 15 curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null |
+		grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"v?[^"]+"' |
+		head -1 |
+		sed -E 's/.*"v?([^"]+)"/\1/' || true)
+
+	printf '%s\n' "$tag"
+	return 0
+}
+
+# Check if a command exists
+check_cmd() {
+	local cmd="$1"
+	command -v "$cmd" >/dev/null 2>&1
+}
+
+# Check if a directory exists
+check_dir() {
+	local dir="$1"
+	[[ -d "$dir" ]]
+}
+
+# Check if a file exists
+check_file() {
+	local file="$1"
+	[[ -f "$file" ]]
+}
+
+# Ensure file ends with a trailing newline (prevents malformed appends)
+ensure_trailing_newline() {
+	local file="$1"
+	local last
+	if [[ -s "$file" ]]; then
+		last="$(
+			tail -c 1 "$file"
+			printf x
+		)"
+		if [[ "$last" != $'\n'x ]]; then
+			printf '\n' >>"$file"
+		fi
+	fi
+	return 0
+}
+
+# Source CLI implementation modules from the namespaced module tree.
+# INSTALL_DIR is the canonical location of maestro.sh (set above). Using
+# INSTALL_DIR rather than BASH_SOURCE[0] preserves installed symlink support:
+# /usr/local/bin/maestro → $INSTALL_DIR/maestro.sh would otherwise resolve
+# BASH_SOURCE[0] to /usr/local/bin instead of the checkout/deployed tree.
+MAESTRO_CLI_MODULES_DIR="${INSTALL_DIR}/.agents/scripts/maestro-cli"
+# shellcheck source=.agents/scripts/maestro-cli/maestro-repos-lib.sh
+# shellcheck disable=SC1091  # module path resolved at runtime via $INSTALL_DIR
+source "${MAESTRO_CLI_MODULES_DIR}/maestro-repos-lib.sh"
+# shellcheck source=.agents/scripts/maestro-cli/maestro-init-lib.sh
+# shellcheck disable=SC1091
+source "${MAESTRO_CLI_MODULES_DIR}/maestro-init-lib.sh"
+# shellcheck source=.agents/scripts/maestro-cli/maestro-skills-plugin-lib.sh
+# shellcheck disable=SC1091
+source "${MAESTRO_CLI_MODULES_DIR}/maestro-skills-plugin-lib.sh"
+# shellcheck source=.agents/scripts/maestro-cli/maestro-status-lib.sh
+# shellcheck disable=SC1091
+source "${MAESTRO_CLI_MODULES_DIR}/maestro-status-lib.sh"
+# shellcheck source=.agents/scripts/maestro-cli/maestro-update-lib.sh
+# shellcheck disable=SC1091
+source "${MAESTRO_CLI_MODULES_DIR}/maestro-update-lib.sh"
+# shellcheck source=.agents/scripts/maestro-cli/maestro-upgrade-planning-lib.sh
+# shellcheck disable=SC1091
+source "${MAESTRO_CLI_MODULES_DIR}/maestro-upgrade-planning-lib.sh"
+
+# Update/upgrade command
+cmd_update() {
+	local skip_project_sync=false
+	local arg
+	for arg in "$@"; do case "$arg" in --skip-project-sync) skip_project_sync=true ;; esac done
+	print_header "Updating Maestro Framework"
+	echo ""
+	local current_version
+	current_version=$(get_version)
+	print_info "Current version: $current_version"
+	print_info "Fetching latest version..."
+
+	if check_dir "$INSTALL_DIR/.git"; then
+		cd "$INSTALL_DIR" || exit 1
+		local current_branch
+		current_branch=$(git branch --show-current 2>/dev/null || echo "")
+		[[ "$current_branch" != "main" ]] && {
+			print_info "Switching to main branch..."
+			git checkout main --quiet 2>/dev/null || git checkout -b main origin/main --quiet 2>/dev/null || true
+		}
+		if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+			print_info "Cleaning up stale working tree changes..."
+			git reset HEAD -- . 2>/dev/null || true
+			git checkout -- . 2>/dev/null || true
+		fi
+		git fetch origin main --tags --quiet
+		local local_hash
+		local_hash=$(git rev-parse HEAD)
+		local remote_hash
+		remote_hash=$(git rev-parse origin/main)
+		if [[ "$local_hash" == "$remote_hash" ]]; then
+			print_success "Framework already up to date!"
+			local repo_version deployed_version
+			repo_version=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown")
+			deployed_version=$(cat "$HOME/.maestro/agents/VERSION" 2>/dev/null || echo "none")
+			if [[ "$repo_version" != "$deployed_version" ]]; then
+				print_warning "Deployed agents ($deployed_version) don't match repo ($repo_version)"
+				print_info "Re-running setup to sync agents..."
+				bash "$INSTALL_DIR/setup.sh" --non-interactive
+			else
+				# t2706: VERSION matches but .deployed-sha may lag HEAD when
+				# fixes land between releases. Detect and redeploy on framework
+				# code drift (inline so bootstrap doesn't depend on the deployed
+				# maestro-update-check.sh already carrying the same check).
+				# Docs-only drift is intentionally skipped — no runtime impact.
+				local stamp_file="$HOME/.maestro/.deployed-sha"
+				if [[ -f "$stamp_file" ]]; then
+					local deployed_sha has_code_drift=0
+					deployed_sha=$(tr -d '[:space:]' <"$stamp_file" 2>/dev/null) || deployed_sha=""
+					if [[ -n "$deployed_sha" && "$deployed_sha" != "$local_hash" ]]; then
+						# Per Gemini code-review on PR #20342: use git's path filter +
+						# `grep -q .` to detect drift across the full set of deploy-affecting
+						# paths (not just .agents/ subdirs — also setup.sh, .agents/scripts/setup/modules/,
+						# and maestro.sh itself, which are deployed/sourced by setup).
+						if git -C "$INSTALL_DIR" diff --name-only "$deployed_sha" "$local_hash" -- \
+							.agents/scripts/ .agents/agents/ .agents/workflows/ .agents/prompts/ .agents/hooks/ \
+							setup.sh .agents/scripts/setup/modules/ maestro.sh 2>/dev/null | grep -q .; then
+							has_code_drift=1
+						fi
+						if [[ "$has_code_drift" -eq 1 ]]; then
+							print_warning "Deployed scripts drifted (${deployed_sha:0:7}→${local_hash:0:7})"
+							print_info "Re-running setup to deploy latest scripts..."
+							bash "$INSTALL_DIR/setup.sh" --non-interactive
+						fi
+						# GH#21735: workflow templates can change between
+						# releases without triggering has_code_drift (templates
+						# live outside the deploy-affecting paths). Check the
+						# template subset separately and surface drift.
+						_update_check_workflow_drift "$deployed_sha" "$local_hash"
+					fi
+				fi
+			fi
+			git checkout -- . 2>/dev/null || true
+		else
+			print_info "Pulling latest changes..."
+			local old_hash
+			old_hash=$(git rev-parse HEAD)
+			if git pull --ff-only origin main --quiet; then
+				:
+			else
+				print_warning "Fast-forward pull failed — resetting to origin/main..."
+				git reset --hard origin/main --quiet 2>/dev/null || {
+					print_error "Failed to reset to origin/main"
+					print_info "Try: cd $INSTALL_DIR && git fetch origin && git reset --hard origin/main"
+					return 1
+				}
+			fi
+			local new_version new_hash
+			new_version=$(get_version)
+			new_hash=$(git rev-parse HEAD)
+			if [[ "$old_hash" != "$new_hash" ]]; then
+				local total_commits
+				total_commits=$(git rev-list --count "$old_hash..$new_hash" 2>/dev/null || echo "0")
+				if [[ "$total_commits" -gt 0 ]]; then
+					echo ""
+					print_info "Changes since $current_version ($total_commits commits):"
+					git log --oneline "$old_hash..$new_hash" | grep -E '^[a-f0-9]+ (feat|fix|refactor|perf|docs):' | head -20
+					[[ "$total_commits" -gt 20 ]] && echo "  ... and more (run 'git log --oneline' in $INSTALL_DIR for full list)"
+				fi
+				# GH#21735: surface workflow template drift so the
+				# operator can resync downstream callers before CI bites.
+				_update_check_workflow_drift "$old_hash" "$new_hash"
+			fi
+			echo ""
+			# Verify supply chain integrity before applying changes
+			_update_verify_signature
+			echo ""
+			print_info "Running setup to apply changes..."
+			local setup_exit=0
+			bash "$INSTALL_DIR/setup.sh" --non-interactive || setup_exit=$?
+			git checkout -- . 2>/dev/null || true
+			local repo_version deployed_version
+			repo_version=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown")
+			deployed_version=$(cat "$HOME/.maestro/agents/VERSION" 2>/dev/null || echo "none")
+			[[ "$setup_exit" -ne 0 ]] && print_warning "Setup exited with code $setup_exit"
+			if [[ "$repo_version" != "$deployed_version" ]]; then
+				print_warning "Agent deployment incomplete: repo=$repo_version, deployed=$deployed_version"
+				print_info "Run 'bash $INSTALL_DIR/setup.sh' manually to deploy agents"
+			else print_success "Updated to version $new_version (agents deployed)"; fi
+		fi
+	else
+		_update_fresh_install || return 1
+	fi
+
+	_update_sync_projects "$skip_project_sync" "$(get_version)"
+	_update_check_homebrew
+	_update_check_planning
+	_update_check_tools
+	_update_sweep_opencode_symlinks
+	# t2926: Re-check setsid on every update (runs even when setup.sh is skipped).
+	_update_check_setsid
+
+	# t2898: When invoked interactively (terminal stdin AND not from the
+	# auto-update daemon itself, which sets MAESTRO_AUTO_UPDATE=1 in its
+	# environment), verify the daemon is healthy and warn if not. The
+	# advisory file gets picked up by the next session greeting so the
+	# user sees the warning even if they miss this output.
+	#
+	# Skip in headless / CI runs (no stdin, no TTY) to avoid spurious
+	# warnings in setup.sh-driven flows that already do their own check.
+	if [[ -t 0 ]] && [[ -z "${MAESTRO_AUTO_UPDATE:-}" ]] && [[ "${NON_INTERACTIVE:-false}" != "true" ]]; then
+		_update_check_daemon_health
+	fi
+
+	# t2946: one-shot idempotent migration from legacy supervisor.* to canonical
+	# orchestration.* namespace in settings.json. Safe: no-op when orchestration.*
+	# is already set. Runs even on "already up to date" updates so users who
+	# install the fix without a new release still get migrated on next 'maestro update'.
+	_migrate_settings_supervisor_to_orchestration
+
+	# t2914: ensure pulse is running after every update. The existing
+	# restart paths (setup.sh:1329, agent-deploy.sh:601) call
+	# pulse-lifecycle-helper.sh restart-if-running which is a silent no-op
+	# when pulse is dead — so a dead pulse stays dead through any number
+	# of subsequent updates. The 'start' subcommand is idempotent
+	# (pulse-lifecycle-helper.sh:127-131): no-op when running, starts when
+	# dead. This belt-and-braces call after the daemon health check
+	# guarantees the pulse is alive when 'maestro update' returns,
+	# regardless of whether scripts were redeployed.
+	#
+	# Honour MAESTRO_SKIP_PULSE_RESTART=1 at the call site (the helper's
+	# 'start' subcommand does not check it directly — only 'restart' and
+	# 'restart-if-running' do). Non-fatal: a pulse start failure should
+	# not fail the update.
+	if [[ "${MAESTRO_SKIP_PULSE_RESTART:-0}" != "1" ]]; then
+		local _pulse_helper="${AGENTS_DIR}/scripts/pulse-lifecycle-helper.sh"
+		if [[ -x "$_pulse_helper" ]]; then
+			"$_pulse_helper" start >/dev/null 2>&1 || print_warning "Pulse start failed (non-fatal)"
+		fi
+	fi
+
+	return 0
+}
+
+# t2898: post-update daemon health verification (interactive only).
+# Side effect: writes ~/.maestro/advisories/daemon-disabled.advisory when
+# the daemon is unhealthy so the session greeting surfaces the warning.
+# Cleared (file removed) when the daemon recovers.
+# Uninstall helpers (extracted for complexity reduction)
+_uninstall_cleanup_refs() {
+	print_info "Removing AI assistant configuration references..."
+	local ai_agent_files=("$HOME/.config/opencode/agent/AGENTS.md" "$HOME/.claude/commands/AGENTS.md" "$HOME/.opencode/AGENTS.md")
+	for file in "${ai_agent_files[@]}"; do
+		if check_file "$file"; then
+			grep -q "Add ~/.maestro/agents/AGENTS.md" "$file" 2>/dev/null && {
+				rm -f "$file"
+				print_success "Removed $file"
+			}
+		fi
+	done
+	print_info "Removing shell aliases..."
+	for rc_file in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
+		if check_file "$rc_file" && grep -q "# AI Assistant Server Access Framework" "$rc_file" 2>/dev/null; then
+			cp "$rc_file" "$rc_file.bak"
+			sed_inplace '/# AI Assistant Server Access Framework/,/^$/d' "$rc_file"
+			print_success "Removed aliases from $rc_file"
+		fi
+	done
+	print_info "Removing AI memory files..."
+	local mf="$HOME/CLAUDE.md"
+	check_file "$mf" && {
+		rm -f "$mf"
+		print_success "Removed $mf"
+	}
+	return 0
+}
+
+# Uninstall command
+cmd_uninstall() {
+	print_header "Uninstall Maestro Framework"
+	echo ""
+	print_warning "This will remove:"
+	echo "  - $AGENTS_DIR (deployed agents)"
+	echo "  - $INSTALL_DIR (repository)"
+	echo "  - AI assistant configuration references"
+	echo "  - Shell aliases (if added)"
+	echo ""
+	print_warning "This will NOT remove:"
+	echo "  - Installed tools (Tabby, Zed, gh, glab, etc.)"
+	echo "  - SSH keys"
+	echo "  - Python/Node environments"
+	echo ""
+	read -r -p "Are you sure you want to uninstall? (yes/no): " confirm
+	[[ "$confirm" != "yes" ]] && {
+		print_info "Uninstall cancelled"
+		return 0
+	}
+	echo ""
+	check_dir "$AGENTS_DIR" && {
+		print_info "Removing $AGENTS_DIR..."
+		rm -rf "$AGENTS_DIR"
+		print_success "Removed agents directory"
+	}
+	check_dir "$HOME/.maestro" && {
+		print_info "Removing $HOME/.maestro..."
+		rm -rf "$HOME/.maestro"
+		print_success "Removed maestro config directory"
+	}
+	_uninstall_cleanup_refs
+	echo ""
+	read -r -p "Also remove the repository at $INSTALL_DIR? (yes/no): " remove_repo
+	if [[ "$remove_repo" == "yes" ]]; then
+		check_dir "$INSTALL_DIR" && {
+			print_info "Removing $INSTALL_DIR..."
+			rm -rf "$INSTALL_DIR"
+			print_success "Removed repository"
+		}
+	else print_info "Keeping repository at $INSTALL_DIR"; fi
+	echo ""
+	print_success "Uninstall complete!"
+	print_info "To reinstall, run:"
+	echo "  npm install -g maestro && maestro update"
+	echo "  OR: brew install Aditya060806/tap/maestro && maestro update"
+}
+
+
+
+# Features command - list available features
+cmd_features() {
+	print_header "Maestro Features"
+	echo ""
+
+	echo "Available features for 'maestro init':"
+	echo ""
+	echo "  planning       TODO.md and PLANS.md task management"
+	echo "                 - Quick task tracking in TODO.md"
+	echo "                 - Complex execution plans in todo/PLANS.md"
+	echo "                 - PRD and task file generation"
+	echo ""
+	echo "  git-workflow   Branch management and PR workflows"
+	echo "                 - Automatic branch suggestions"
+	echo "                 - Preflight quality checks"
+	echo "                 - PR creation and review"
+	echo ""
+	echo "  code-quality   Linting and code auditing"
+	echo "                 - ShellCheck, secretlint, pattern checks"
+	echo "                 - Remote auditing (CodeRabbit, Codacy, SonarCloud)"
+	echo "                 - Code standards compliance"
+	echo ""
+	echo "  time-tracking  Time estimation and tracking"
+	echo "                 - Estimate format: ~4h (ai:2h test:1h)"
+	echo "                 - Automatic started:/completed: timestamps"
+	echo "                 - Release time summaries"
+	echo ""
+	echo "  database       Declarative database schema management"
+	echo "                 - schemas/ for declarative SQL/TypeScript"
+	echo "                 - migrations/ for versioned changes"
+	echo "                 - seeds/ for initial/test data"
+	echo "                 - Auto-generate migrations on schema diff"
+	echo ""
+	echo "  beads          Task graph visualization with Beads"
+	echo "                 - Dependency tracking (blocked-by:, blocks:)"
+	echo "                 - Graph visualization with bd CLI"
+	echo "                 - Ready task detection (/ready)"
+	echo "                 - Bi-directional sync with TODO.md/PLANS.md"
+	echo ""
+	echo "  sops           Encrypted config files with SOPS + age"
+	echo "                 - Value-level encryption (keys visible, values encrypted)"
+	echo "                 - .sops.yaml with age backend (simpler than GPG)"
+	echo "                 - Patterns: *.secret.yaml, configs/*.enc.json"
+	echo "                 - See: .agents/tools/credentials/sops.md"
+	echo ""
+	echo "  security       Per-repo security posture assessment"
+	echo "                 - GitHub Actions workflow scanning (injection risks)"
+	echo "                 - Branch protection verification (PR reviews)"
+	echo "                 - Review-bot-gate status check"
+	echo "                 - Dependency vulnerability scanning (npm/pip/cargo)"
+	echo "                 - Collaborator access audit"
+	echo "                 - Re-run anytime: maestro security audit"
+	echo ""
+	echo "Extensibility:"
+	echo ""
+	echo "  plugins        Third-party agent plugins (configured in .maestro.json)"
+	echo "                 - Git repos deployed to ~/.maestro/agents/<namespace>/"
+	echo "                 - Namespaced to avoid collisions with core agents"
+	echo "                 - Enable/disable per-plugin without removal"
+	echo "                 - See: .agents/maestro/plugins.md"
+	echo ""
+	echo "Usage:"
+	echo "  maestro init                    # Enable all features (except sops)"
+	echo "  maestro init planning           # Enable only planning"
+	echo "  maestro init sops               # Enable SOPS encryption"
+	echo "  maestro init security           # Enable security posture checks"
+	echo "  maestro init beads              # Enable beads (includes planning)"
+	echo "  maestro init database           # Enable only database"
+	echo "  maestro init planning,security  # Enable multiple"
+	echo ""
+}
+
+# Update tools command - check and update installed tools
+# Passes all arguments through to tool-version-check.sh
+cmd_update_tools() {
+	print_header "Tool Version Check"
+	echo ""
+
+	local tool_check_script="$AGENTS_DIR/scripts/tool-version-check.sh"
+
+	if [[ ! -f "$tool_check_script" ]]; then
+		print_error "Tool version check script not found"
+		print_info "Run 'maestro update' first to get the latest scripts"
+		return 1
+	fi
+
+	# Pass all arguments through to the script
+	bash "$tool_check_script" "$@"
+}
+
+# Repos helpers (extracted for complexity reduction)
+_repos_list() {
+	print_header "Registered Maestro Projects"
+	echo ""
+	init_repos_file
+	command -v jq &>/dev/null || {
+		print_error "jq required for repo management"
+		return 1
+	}
+	local count
+	count=$(jq '.initialized_repos | length' "$REPOS_FILE" 2>/dev/null || echo "0")
+	if [[ "$count" == "0" ]]; then
+		print_info "No projects registered yet"
+		echo ""
+		echo "Initialize a project with: maestro init"
+		return 0
+	fi
+	local current_ver
+	current_ver=$(get_version)
+	jq -r '.initialized_repos[] | "\(.path)|\(.version)|\(.features | join(","))"' "$REPOS_FILE" 2>/dev/null | while IFS='|' read -r path version features; do
+		local name
+		name=$(basename "$path")
+		local status="✓" status_color="$GREEN"
+		[[ "$version" != "$current_ver" ]] && {
+			status="↑"
+			status_color="$YELLOW"
+		}
+		[[ ! -d "$path" ]] && {
+			status="✗"
+			status_color="$RED"
+		}
+		echo -e "${status_color}${status}${NC} ${BOLD}$name${NC}"
+		echo "    Path: $path"
+		echo "    Version: $version"
+		echo "    Features: $features"
+		echo ""
+	done
+	echo "Legend: ✓ up-to-date  ↑ update available  ✗ not found"
+	return 0
+}
+
+_repos_add() {
+	git rev-parse --is-inside-work-tree &>/dev/null || {
+		print_error "Not in a git repository"
+		return 1
+	}
+	local project_root
+	project_root=$(git rev-parse --show-toplevel)
+	[[ ! -f "$project_root/.maestro.json" ]] && {
+		print_error "No .maestro.json found - run 'maestro init' first"
+		return 1
+	}
+	local version features
+	if command -v jq &>/dev/null; then
+		version=$(jq -r '.version' "$project_root/.maestro.json" 2>/dev/null || echo "unknown")
+		features=$(jq -r '[.features | to_entries[] | select(.value == true) | .key] | join(",")' "$project_root/.maestro.json" 2>/dev/null || echo "")
+	else
+		version="unknown"
+		features=""
+	fi
+	register_repo "$project_root" "$version" "$features"
+	print_success "Registered $(basename "$project_root")"
+	return 0
+}
+
+_repos_remove() {
+	local repo_path="${1:-}"
+	local original_path="$repo_path"
+	if [[ -z "$repo_path" ]]; then
+		git rev-parse --is-inside-work-tree &>/dev/null && repo_path=$(git rev-parse --show-toplevel) && original_path="$repo_path" || {
+			print_error "Specify a repo path or run from within a git repo"
+			return 1
+		}
+	fi
+	repo_path=$(cd "$repo_path" 2>/dev/null && pwd -P) || repo_path="$original_path"
+	command -v jq &>/dev/null || {
+		print_error "jq required for repo management"
+		return 1
+	}
+	local temp_file="${REPOS_FILE}.tmp"
+	jq --arg path "$repo_path" '.initialized_repos |= map(select(.path != $path))' "$REPOS_FILE" >"$temp_file" && mv "$temp_file" "$REPOS_FILE"
+	print_success "Removed $repo_path from registry"
+	return 0
+}
+
+_repos_clean() {
+	print_info "Cleaning up stale repo entries..."
+	command -v jq &>/dev/null || {
+		print_error "jq required for repo management"
+		return 1
+	}
+	local removed=0 temp_file="${REPOS_FILE}.tmp"
+	while IFS= read -r repo_path; do
+		[[ -z "$repo_path" ]] && continue
+		if [[ ! -d "$repo_path" ]]; then
+			jq --arg path "$repo_path" '.initialized_repos |= map(select(.path != $path))' "$REPOS_FILE" >"$temp_file" && mv "$temp_file" "$REPOS_FILE"
+			print_info "Removed: $repo_path"
+			removed=$((removed + 1))
+		fi
+	done < <(get_registered_repos)
+	[[ $removed -eq 0 ]] && print_success "No stale entries found" || print_success "Removed $removed stale entries"
+	return 0
+}
+
+# Repos management command
+cmd_repos() {
+	local action="${1:-list}"
+	case "$action" in
+	list | ls) _repos_list ;;
+	add) _repos_add ;;
+	remove | rm) _repos_remove "${2:-}" ;;
+	clean) _repos_clean ;;
+	*)
+		echo "Usage: maestro repos <command>"
+		echo ""
+		echo "Commands:"
+		echo "  list     List all registered projects (default)"
+		echo "  add      Register current project"
+		echo "  remove   Remove project from registry"
+		echo "  clean    Remove entries for non-existent projects"
+		;;
+	esac
+}
+
+# Detect command - check for unregistered maestro repos
+cmd_detect() {
+	print_header "Detecting Maestro Projects"
+	echo ""
+
+	# Check current directory first
+	local unregistered
+	unregistered=$(detect_unregistered_repo)
+
+	if [[ -n "$unregistered" ]]; then
+		print_info "Found unregistered maestro project:"
+		echo "  $unregistered"
+		echo ""
+		read -r -p "Register this project? [Y/n] " response
+		response="${response:-y}"
+		if [[ "$response" =~ ^[Yy]$ ]]; then
+			local version features
+			if command -v jq &>/dev/null; then
+				version=$(jq -r '.version' "$unregistered/.maestro.json" 2>/dev/null || echo "unknown")
+				features=$(jq -r '[.features | to_entries[] | select(.value == true) | .key] | join(",")' "$unregistered/.maestro.json" 2>/dev/null || echo "")
+			else
+				version="unknown"
+				features=""
+			fi
+			register_repo "$unregistered" "$version" "$features"
+			print_success "Registered $(basename "$unregistered")"
+		fi
+		return 0
+	fi
+
+	# Scan common locations
+	print_info "Scanning for maestro projects in ~/Git/..."
+
+	local found=0
+	local to_register=()
+
+	if [[ -d "$HOME/Git" ]]; then
+		while IFS= read -r -d '' maestro_json; do
+			local repo_dir
+			repo_dir=$(dirname "$maestro_json")
+
+			# Check if already registered
+			init_repos_file
+			if command -v jq &>/dev/null; then
+				if ! jq -e --arg path "$repo_dir" '.initialized_repos[] | select(.path == $path)' "$REPOS_FILE" &>/dev/null; then
+					to_register+=("$repo_dir")
+					found=$((found + 1))
+				fi
+			fi
+		done < <(find "$HOME/Git" -maxdepth 3 -name ".maestro.json" -print0 2>/dev/null)
+	fi
+
+	if [[ $found -eq 0 ]]; then
+		print_success "No unregistered maestro projects found"
+		return 0
+	fi
+
+	echo ""
+	print_info "Found $found unregistered project(s):"
+	for repo in "${to_register[@]}"; do
+		echo "  - $(basename "$repo") ($repo)"
+	done
+
+	echo ""
+	read -r -p "Register all? [Y/n] " response
+	response="${response:-y}"
+	if [[ "$response" =~ ^[Yy]$ ]]; then
+		for repo in "${to_register[@]}"; do
+			local version features
+			if command -v jq &>/dev/null; then
+				version=$(jq -r '.version' "$repo/.maestro.json" 2>/dev/null || echo "unknown")
+				features=$(jq -r '[.features | to_entries[] | select(.value == true) | .key] | join(",")' "$repo/.maestro.json" 2>/dev/null || echo "")
+			else
+				version="unknown"
+				features=""
+			fi
+			register_repo "$repo" "$version" "$features"
+			print_success "Registered $(basename "$repo")"
+		done
+	fi
+	return 0
+}
+
+_cmd_setup_help() {
+	printf '%s\n' "Usage: maestro setup --scope <scope>"
+	printf '%s\n' ""
+	printf '%s\n' "Scopes:"
+	printf '%s\n' "  opencode  Repair/install the OpenCode CLI only"
+	printf '%s\n' "  agents    Deploy maestro agents/scripts only"
+	printf '%s\n' "  hooks     Install safety hooks only"
+	printf '%s\n' "  tabby     Sync Tabby terminal profiles only"
+	printf '%s\n' "  pulse     Install/refresh the pulse scheduler only"
+	printf '%s\n' "  gui-desktop  Install native macOS maestro.app only"
+	printf '%s\n' "  full      Run ./setup.sh --non-interactive"
+	return 0
+}
+
+cmd_setup() {
+	local scope=""
+	while [[ $# -gt 0 ]]; do
+		local arg="$1"
+		case "$arg" in
+		--scope)
+			if [[ -z "${2:-}" ]]; then
+				print_error "--scope requires a value"
+				_cmd_setup_help
+				return 1
+			fi
+			scope="$2"
+			shift 2
+			;;
+		--scope=*)
+			scope="${arg#--scope=}"
+			shift
+			;;
+		help | --help | -h)
+			_cmd_setup_help
+			return 0
+			;;
+		*)
+			print_error "Unknown setup option: $arg"
+			_cmd_setup_help
+			return 1
+			;;
+		esac
+	done
+
+	if [[ -z "$scope" ]]; then
+		print_error "Missing required --scope value"
+		_cmd_setup_help
+		return 1
+	fi
+
+	local setup_script="${INSTALL_DIR}/setup.sh"
+	if [[ ! -f "$setup_script" ]]; then
+		print_error "setup.sh not found at $setup_script"
+		return 1
+	fi
+
+	if [[ "$scope" == "full" ]]; then
+		bash "$setup_script" --non-interactive
+		return $?
+	fi
+
+	bash "$setup_script" --stage "$scope"
+	return $?
+}
+
+
+# Help text helpers (extracted for complexity reduction)
+_help_commands() {
+	echo "Commands:"
+	echo "  init [features]    Initialize maestro in current project"
+	echo "  setup --scope <s>  Run scoped setup/deploy (opencode, agents, hooks, tabby, pulse, gui-desktop, full)"
+	echo "  init-routines      Scaffold private routines repo (--org <name> | --local)"
+	echo "  upgrade-planning   Upgrade TODO.md/PLANS.md to latest templates"
+	echo "  features           List available features for init"
+	echo "  skill <cmd>        Manage agent skills (add/list/check/update/remove)"
+	echo "  skills <cmd>       Discover skills (search/browse/describe/recommend)"
+	echo "  plugin <cmd>       Manage plugins (add/list/update/enable/disable/remove)"
+	echo "  status             Check installation status of all components"
+	echo "  doctor             Detect duplicate installs and PATH conflicts (--fix to resolve)"
+	echo "  update             Update maestro to the latest version (alias: upgrade)"
+	echo "  upgrade            Alias for update"
+	echo "  pulse <cmd>        Session-based pulse control (start/stop/status)"
+	echo "  launch-worker      Manually launch headless workers for GitHub issues"
+	echo "  worktree <cmd>     Manage safe linked worktrees (add/list/remove/status/switch/clean) (alias: wt)"
+	echo "  auto-update <cmd>  Manage automatic update polling (enable/disable/status)"
+	echo "  repo-sync <cmd>    Daily git pull for repos in parent dirs (enable/disable/status/dirs)"
+	echo "  update-tools       Check for outdated tools (--update to auto-update)"
+	echo "  repos [cmd]        Manage registered projects (list/add/remove/clean)"
+	echo "  design <cmd>       DESIGN.md detection, scaffolding, and brand guideline exports"
+	echo "  cleanup <cmd>      Cleanup helpers (remote branch audit/delete)"
+	echo "  model-accounts-pool OAuth account pool (list/check/diagnose/add/rotate/reset-cooldowns)"
+	echo "  client-format      Client request format alignment (extract/check/canary/monitor)"
+	echo "  opencode-db <cmd>  OpenCode SQLite maintenance/session lookup (check/report/sessions/maintain/window/status/install)"
+	echo "  opencode [args]    Launch OpenCode with maestro per-session DB isolation"
+	echo "  opencode-desktop   Launch/install OpenCode Desktop with maestro DB isolation"
+	echo "  opencode-sandbox   Test OpenCode versions in isolation (install/run/check/clean)"
+	echo "  approve <cmd>      Cryptographic issue/PR approval (setup/issue/pr/verify/status)"
+	echo "  circuit-breaker    Supervisor circuit breaker (status/reset/check/trip) (alias: cb)"
+	echo "  issue <cmd>        Interactive issue ownership (claim/release/status/scan-stale)"
+	echo "  security [cmd]     Full security assessment (posture + hygiene + supply chain)"
+	echo "  contributions      External contributions inbox (bare: status | seed/scan/stop/restart/install/uninstall)"
+	echo "  inbox [cmd]        Capture transit zone (bare: status | provision/add/find/digest/help)"
+	echo "  email [cmd]        Email mailbox management (mailbox add/list/test/remove)"
+	echo "  ip-check <cmd>     IP reputation checks (check/batch/report/providers)"
+	echo "  review-gate <cmd>  Configure review_gate merge policies (rate-limit/completion)"
+	echo "  github-app-auth    GitHub App auth setup/status and API route decisions"
+	echo "  secret <cmd>       Manage secrets (set/list/run/init/import/status)"
+	echo "  vault <cmd>        Local encrypted Vault broker (init/unlock/lock/status/read/update)"
+	echo "  config <cmd>       Feature toggles (list/get/set/reset/path/help)"
+	echo "  knowledge <cmd>    Knowledge plane management (init/status/provision)"
+	echo "  campaign <cmd>     Campaign plane: init/provision/ls (P1) + asset (P4) + new/list/status/archive (P2) + draft (P5) + launch/promote (P6)"
+	echo "  stats <cmd>        LLM usage analytics (summary/models/projects/costs/trend)"
+	echo "  tabby <cmd>        Manage Tabby terminal profiles (sync/status/zshrc/help)"
+	echo "  parent-status <N>  Show decomposition state of parent-task issue #N (alias: ps)"
+	echo "  detect             Find and register maestro projects"
+	echo "  uninstall          Remove maestro from your system"
+	echo "  version            Show version information"
+	echo "  help               Show this help message"
+	return 0
+}
+
+_help_detailed_sections() {
+	echo "Security:"
+	echo "  maestro security            # Run ALL checks (posture + hygiene + supply chain)"
+	echo "  maestro security posture    # Interactive security posture setup (gopass, gh, SSH)"
+	echo "  maestro security status     # Combined posture + hygiene summary"
+	echo "  maestro security scan       # Secret hygiene & supply chain scan"
+	echo "  maestro security scan-pth   # Python .pth file audit (supply chain IoC)"
+	echo "  maestro security scan-secrets # Plaintext credential locations"
+	echo "  maestro security scan-deps  # Unpinned dependency check"
+	echo "  maestro security supply-chain scan [path] # npm supply-chain IOC scan"
+	echo "  maestro security check      # Per-repo security posture assessment"
+	echo "  maestro security dismiss <id> # Dismiss a security advisory"
+	echo ""
+	echo "IP Reputation:"
+	echo "  maestro ip-check check <ip> # Check IP reputation across providers"
+	echo "  maestro ip-check batch <f>  # Batch check IPs from file"
+	echo "  maestro ip-check report <ip># Generate markdown report"
+	echo "  maestro ip-check providers  # List available providers"
+	echo "  maestro ip-check cache-stats# Show cache statistics"
+	echo ""
+	echo "Model Accounts Pool (OAuth):"
+	echo "  maestro model-accounts-pool status            # Pool health at a glance"
+	echo "  maestro model-accounts-pool list              # Per-account detail"
+	echo "  maestro model-accounts-pool check             # Live token validity test"
+	echo "  maestro model-accounts-pool diagnose          # Full pipeline diagnostics (pool, plugin, CCH, runtime)"
+	echo "  maestro model-accounts-pool rotate [provider] # Switch to next available account NOW (use when rate-limited)"
+	echo "  maestro model-accounts-pool reset-cooldowns   # Clear rate-limit cooldowns"
+	echo "  maestro model-accounts-pool add anthropic     # Add Claude Pro/Max account"
+	echo "  maestro model-accounts-pool add openai        # Add ChatGPT Plus/Pro account"
+	echo "  maestro model-accounts-pool add cursor        # Add Cursor Pro account"
+	echo "  maestro model-accounts-pool add google        # Add Google AI Pro/Ultra/Workspace account"
+	echo "  maestro model-accounts-pool import claude-cli # Import from Claude CLI auth"
+	echo "  maestro model-accounts-pool assign-pending <provider># Assign stranded token"
+	echo "  maestro model-accounts-pool remove <provider> <email># Remove an account"
+	echo ""
+	echo "  Auth troubleshooting (run diagnose first, then recovery if needed):"
+	echo "    maestro model-accounts-pool diagnose        # 0. Full pipeline check (start here)"
+	echo "    maestro model-accounts-pool status          # 1. Check pool health"
+	echo "    maestro model-accounts-pool check           # 2. Test token validity"
+	echo "    maestro model-accounts-pool rotate anthropic# 3. Switch account if rate-limited"
+	echo "    maestro model-accounts-pool reset-cooldowns # 4. Clear cooldowns if all stuck"
+	echo "    maestro model-accounts-pool add anthropic   # 5. Re-add if pool empty"
+	echo ""
+	echo "Client Format:"
+	echo "  maestro client-format               # Show status + cached constants"
+	echo "  maestro client-format extract        # Re-extract constants from installed CLI"
+	echo "  maestro client-format check          # Verify cache matches installed CLI version"
+	echo "  maestro client-format canary         # Run drift check against real CLI (uses tokens)"
+	echo "  maestro client-format monitor [cmd]  # Traffic capture + diff (requires mitmproxy)"
+	echo "  maestro client-format install-canary # Install daily drift check (launchd)"
+	echo ""
+	echo "  If requests stop working after a CLI update:"
+	echo "    maestro client-format extract      # 1. Re-extract constants"
+	echo "    maestro client-format canary       # 2. Verify against real CLI"
+	echo ""
+	echo "Secrets:"
+	echo "  maestro secret set NAME     # Store a secret (hidden input)"
+	echo "  maestro secret list         # List secret names (never values)"
+	echo "  maestro secret run CMD      # Run with secrets injected + redacted"
+	echo "  maestro secret init         # Initialize gopass encrypted store"
+	echo "  maestro secret import       # Import from credentials.sh to gopass"
+	echo "  maestro secret status       # Show backend status"
+	echo ""
+	echo "Vault:"
+	echo "  maestro vault init          # Create local encrypted Vault metadata"
+	echo "  maestro vault status        # Show uninitialized/locked/unlocked/corrupted"
+	echo "  maestro vault unlock        # Unlock into an in-memory local broker"
+	echo "  maestro vault lock          # Stop broker and forget in-memory keys"
+	echo "  maestro vault read NAME     # Read protected data through broker"
+	echo "  maestro vault update NAME   # Encrypt stdin value through broker"
+	echo ""
+	echo "GitHub App Auth:"
+	echo "  maestro github-app-auth status --json       # Show active auth mode and budgets"
+	echo "  maestro github-app-auth route issue-list    # Explain route decision"
+	echo "  maestro github-app-auth rate-limit --json   # Show cached per-pool budgets"
+	echo ""
+	echo "Feature Toggles:"
+	echo "  maestro config list         # List all toggles with current values"
+	echo "  maestro config get <key>    # Get a toggle value"
+	echo "  maestro config set <k> <v>  # Set a toggle (true/false)"
+	echo "  maestro config reset [key]  # Reset toggle(s) to defaults"
+	echo "  maestro config path         # Show config file path"
+	echo ""
+	echo "Knowledge Plane:"
+	echo "  maestro knowledge init repo           # Provision _knowledge/ in current repo"
+	echo "  maestro knowledge init personal       # Provision at ~/.maestro/.agent-workspace/knowledge/"
+	echo "  maestro knowledge init off            # Disable knowledge plane"
+	echo "  maestro knowledge status              # Show provisioning state"
+	echo "  maestro knowledge provision [path]    # Re-provision (idempotent)"
+	echo "  maestro knowledge add <file|url>      # Ingest file or URL into sources/"
+	echo "  maestro knowledge list [--state s] [--kind k]  # List all known sources"
+	echo "  maestro knowledge search <query>      # Search sources (grep fallback)"
+	echo ""
+	echo "Design Systems:"
+	echo "  maestro design detect [path]          # Detect whether a repo has a GUI/interface"
+	echo "  maestro design scaffold [path]        # Create DESIGN.md skeleton when missing"
+	echo "  maestro design guidelines [path] --pdf # Generate brand guideline HTML/PDF exports"
+	echo "  maestro design survey [--json]        # Audit owned initialized GUI repos"
+	echo "  maestro design issues --apply         # File auto-dispatch issues for missing design artifacts"
+	echo ""
+	echo "Campaign Plane:"
+	echo "  maestro campaign init [<path>]          # Provision _campaigns/ directory contract (P1)"
+	echo "  maestro campaign provision [<path>]     # Re-provision / repair (idempotent, P1)"
+	echo "  maestro campaign ls [--active|--launched|--all] [<path>]  # Directory listing (P1)"
+	echo "  maestro campaign new <name> [--channel <ch>]  # Scaffold active/<id>/ (P2)"
+	echo "  maestro campaign list                         # Show all campaigns (P2)"
+	echo "  maestro campaign status <id>                  # Detailed dossier for a campaign (P2)"
+	echo "  maestro campaign archive <id>                 # Move launched/<id> → archive/ (P2)"
+	echo "  maestro campaign asset add <file> [--target lib-brand|lib-swipe|campaign]  # Ingest asset (P4)"
+	echo "  maestro campaign asset list [--type image|video|audio|pdf|all]             # List assets (P4)"
+	echo "  maestro campaign asset preview <file> [--size 640]                         # Generate preview PNG (P4)"
+	echo "  maestro campaign asset manifest <asset-id>                                 # Show asset manifest entry (P4)"
+	echo "  maestro campaign draft <id> --channel <ch>    # AI-generated content draft (P5)"
+	echo "  maestro campaign launch <id>                  # Move active/<id> → launched/, create templates (P6)"
+	echo "  maestro campaign promote <id> [--results|--learnings] # Cross-plane promotion (P6)"
+	echo "  maestro campaign feedback [<id>]              # Surface _feedback/ insights for research (P6)"
+	echo ""
+	echo "LLM Stats:"
+	echo "  maestro stats               # Show usage summary (last 30 days)"
+	echo "  maestro stats summary       # Overall usage summary"
+	echo "  maestro stats models        # Per-model breakdown"
+	echo "  maestro stats projects      # Per-project breakdown"
+	echo "  maestro stats costs         # Cost analysis with category breakdown"
+	echo "  maestro stats trend         # Usage trends over time"
+	echo "  maestro stats ingest        # Parse new Claude JSONL log entries"
+	echo "  maestro stats sync-budget   # Sync to budget tracker (t1100)"
+	echo ""
+	echo "Supervisor Circuit Breaker (t1331):"
+	echo "  maestro circuit-breaker             # Show breaker state (alias: cb)"
+	echo "  maestro circuit-breaker status      # Show breaker state"
+	echo "  maestro circuit-breaker reset       # Manually reset (resumes worker dispatch)"
+	echo "  maestro circuit-breaker check       # Exit 0 if dispatch allowed, 1 if paused"
+	echo "  maestro circuit-breaker trip        # Manually trip (testing)"
+	echo "  maestro cb reset                    # Short alias for reset"
+	echo ""
+	echo "  When the breaker trips (auto-filed GH issue), copy/paste:"
+	echo "    maestro circuit-breaker reset"
+	echo ""
+	_help_management_sections
+	return 0
+}
+
+_help_management_sections() {
+	echo "Auto-Update:"
+	echo "  maestro auto-update enable  # Poll for updates every 10 min"
+	echo "  maestro auto-update disable # Stop auto-updating"
+	echo "  maestro auto-update status  # Show auto-update state"
+	echo "  maestro auto-update check   # One-shot check and update now"
+	echo ""
+	echo "Repo Sync:"
+	echo "  maestro repo-sync enable    # Enable daily git pull for repos"
+	echo "  maestro repo-sync disable   # Disable daily sync"
+	echo "  maestro repo-sync status    # Show sync state and last results"
+	echo "  maestro repo-sync check     # One-shot sync all repos now"
+	echo "  maestro repo-sync dirs list # List configured parent directories"
+	echo "  maestro repo-sync dirs add  # Add a parent directory"
+	echo "  maestro repo-sync dirs rm   # Remove a parent directory"
+	echo "  maestro repo-sync config    # Show/edit configuration"
+	echo "  maestro repo-sync logs      # View sync logs"
+	echo ""
+	echo "Agent Sources (private repos):"
+	echo "  maestro sources add <path>  # Add a local repo as agent source"
+	echo "  maestro sources add-remote <url> # Clone and add remote repo"
+	echo "  maestro sources remove <n>  # Remove a source (keeps agents)"
+	echo "  maestro sources list        # List configured sources"
+	echo "  maestro sources status      # Show sync status"
+	echo "  maestro sources sync        # Sync all sources to custom/"
+	echo ""
+	echo "Plugins:"
+	echo "  maestro plugin add <url>    # Install a plugin from git repo"
+	echo "  maestro plugin list         # List installed plugins"
+	echo "  maestro plugin update       # Update all plugins"
+	echo "  maestro plugin remove <n>   # Remove a plugin"
+	echo ""
+	echo "Skill Management:"
+	echo "  maestro skill add <source>  # Import a skill from GitHub"
+	echo "  maestro skill list          # List imported skills"
+	echo "  maestro skill check         # Check for upstream updates"
+	echo "  maestro skill update [name] # Update skills to latest"
+	echo "  maestro skill remove <name> # Remove an imported skill"
+	echo ""
+	echo "Skill Discovery:"
+	echo "  maestro skills search <q>   # Search skills by keyword"
+	echo "  maestro skills browse       # Browse skills by category"
+	echo "  maestro skills describe <n> # Show skill description"
+	echo "  maestro skills recommend <t># Suggest skills for a task"
+	echo "  maestro skills categories   # List all categories"
+	echo ""
+	echo "Installation:"
+	echo "  brew install Aditya060806/tap/maestro && maestro update  # macOS/Homebrew"
+	echo "  npm install -g maestro && maestro update                # Linux/cross-platform"
+	echo ""
+	echo "Documentation: https://github.com/Aditya060806/Maestro"
+	return 0
+}
+
+# Help command
+cmd_help() {
+	local version
+	version=$(get_version)
+	echo "Maestro Framework CLI v$version"
+	echo ""
+	echo "Usage: maestro <command> [options]"
+	echo ""
+	_help_commands
+	echo ""
+	echo "Examples:"
+	echo "  maestro init                # Initialize with all features"
+	echo "  maestro init planning       # Initialize with planning only"
+	echo "  maestro upgrade-planning    # Upgrade planning files to latest"
+	echo "  maestro features            # List available features"
+	echo "  maestro status              # Check what's installed"
+	echo "  maestro doctor              # Find duplicate/conflicting installs"
+	echo "  maestro doctor --fix        # Interactively remove duplicates"
+	echo "  maestro update              # Update framework + check projects"
+	echo "  maestro repos               # List registered projects"
+	echo "  maestro launch-worker 22259 Aditya060806/Maestro --dry-run"
+	echo "  maestro repos add           # Register current project"
+	echo "  maestro detect              # Find unregistered projects"
+	echo "  maestro update-tools        # Check for outdated tools"
+	echo "  maestro update-tools -u     # Update all outdated tools"
+	echo "  maestro uninstall           # Remove maestro"
+	echo ""
+	_help_detailed_sections
+	return 0
+}
+
+# Version command
+cmd_version() {
+	local current_version
+	current_version=$(get_version)
+	local remote_version
+	remote_version=$(get_remote_version)
+
+	echo "maestro $current_version"
+
+	if [[ "$remote_version" != "unknown" && "$current_version" != "$remote_version" ]]; then
+		echo "Latest: $remote_version (run 'maestro update' to upgrade)"
+	fi
+}
+
+# Helper dispatch (extracted from main for complexity reduction)
+_dispatch_helper() {
+	local script_name="$1" error_name="$2"
+	shift 2
+	local source_hp="$INSTALL_DIR/.agents/scripts/$script_name"
+	local deployed_hp="$AGENTS_DIR/scripts/$script_name"
+	local hp="$deployed_hp"
+	if [[ -f "$source_hp" && -f "$INSTALL_DIR/.agents/scripts/maestro-cli/maestro-repos-lib.sh" ]]; then
+		hp="$source_hp"
+	fi
+	[[ ! -f "$hp" ]] && hp="$source_hp"
+	if [[ -f "$hp" ]]; then
+		bash "$hp" "$@"
+	else
+		print_error "$error_name not found. Run: maestro update"
+		exit 1
+	fi
+	return 0
+}
+
+_dispatch_config() {
+	local ch="$AGENTS_DIR/scripts/config-helper.sh"
+	[[ ! -f "$ch" ]] && ch="$INSTALL_DIR/.agents/scripts/config-helper.sh"
+	[[ ! -f "$ch" ]] && ch="$AGENTS_DIR/scripts/feature-toggle-helper.sh"
+	[[ ! -f "$ch" ]] && ch="$INSTALL_DIR/.agents/scripts/feature-toggle-helper.sh"
+	if [[ -f "$ch" ]]; then
+		bash "$ch" "$@"
+	else
+		print_error "config-helper.sh not found. Run: maestro update"
+		exit 1
+	fi
+	return 0
+}
+
+_launch_worker_usage() {
+	cat <<'EOF'
+Usage: maestro launch-worker <issue|issue,issue> [owner/repo] [options]
+       maestro launch-worker --batch <issue,issue> [owner/repo] [options]
+       maestro launch-worker status <issue> [owner/repo]
+
+Launch one or more headless workers manually without waiting for the pulse.
+If owner/repo is omitted, it defaults to the current git repository's origin.
+
+Options:
+  --model <id>      Override model (for example, anthropic/claude-opus-4-7).
+  --agent <name>    Worker agent name (default: Build+).
+  --batch <list>    Comma-separated issue numbers to launch.
+  --dry-run         Print the planned dispatch without launching.
+  --no-ceremony     Skip status/origin/assignee ceremony (debug only).
+  -h, --help        Show this help.
+
+Output includes the worker PID, worktree path, log path, session key, and a
+status command for each launched issue.
+EOF
+	return 0
+}
+
+_launch_worker_default_repo() {
+	local remote_url=""
+	remote_url=$(git remote get-url origin 2>/dev/null || true)
+	if [[ "$remote_url" =~ github\.com[:/]([^/]+/[^/.]+)(\.git)?$ ]]; then
+		printf '%s\n' "${BASH_REMATCH[1]}"
+		return 0
+	fi
+	return 1
+}
+
+_launch_worker_helper_path() {
+	local source_dir helper_path
+	source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	helper_path="$source_dir/.agents/scripts/dispatch-single-issue-helper.sh"
+	[[ ! -f "$helper_path" ]] && helper_path="$INSTALL_DIR/.agents/scripts/dispatch-single-issue-helper.sh"
+	[[ ! -f "$helper_path" ]] && helper_path="$AGENTS_DIR/scripts/dispatch-single-issue-helper.sh"
+	if [[ ! -f "$helper_path" ]]; then
+		print_error "dispatch-single-issue-helper.sh not found. Run: maestro update"
+		return 1
+	fi
+	printf '%s\n' "$helper_path"
+	return 0
+}
+
+_launch_worker_status() {
+	local status_issue="${1:-}"
+	local status_repo="${2:-}"
+	if [[ -z "$status_issue" ]]; then
+		print_error "launch-worker status requires <issue> [owner/repo]"
+		return 2
+	fi
+	if [[ -z "$status_repo" ]]; then
+		status_repo=$(_launch_worker_default_repo) || {
+			print_error "Could not infer owner/repo from git remote; pass it explicitly"
+			return 2
+		}
+	fi
+	local status_helper_path
+	status_helper_path=$(_launch_worker_helper_path) || return 1
+	bash "$status_helper_path" status "$status_issue" "$status_repo"
+	return 0
+}
+
+cmd_launch_worker() {
+	local sub_or_issue="${1:-}"
+	if [[ -z "$sub_or_issue" || "$sub_or_issue" == "help" || "$sub_or_issue" == "--help" || "$sub_or_issue" == "-h" ]]; then
+		_launch_worker_usage
+		return 0
+	fi
+
+	if [[ "$sub_or_issue" == "status" ]]; then
+		shift || true
+		_launch_worker_status "$@"
+		return $?
+	fi
+
+	local issue_spec=""
+	local repo_slug=""
+	local batch_spec=""
+	local -a helper_opts=()
+	while [[ $# -gt 0 ]]; do
+		local arg="$1"
+		case "$arg" in
+		--batch)
+			if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+				print_error "--batch requires a comma-separated issue list"
+				return 2
+			fi
+			batch_spec="${2}"
+			shift 2
+			;;
+		--model | --agent)
+			if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+				print_error "$arg requires a value"
+				return 2
+			fi
+			helper_opts+=("$arg" "${2}")
+			shift 2
+			;;
+		--dry-run | --no-ceremony)
+			helper_opts+=("$arg")
+			shift
+			;;
+		--help | -h)
+			_launch_worker_usage
+			return 0
+			;;
+		--*)
+			print_error "Unknown launch-worker flag: $arg"
+			return 2
+			;;
+		*)
+			if [[ -z "$issue_spec" ]]; then
+				issue_spec="$arg"
+			elif [[ -z "$repo_slug" ]]; then
+				repo_slug="$arg"
+			else
+				print_error "Unexpected launch-worker argument: $arg"
+				return 2
+			fi
+			shift
+			;;
+		esac
+	done
+
+	[[ -n "$batch_spec" ]] && issue_spec="$batch_spec"
+	if [[ -z "$issue_spec" ]]; then
+		print_error "launch-worker requires an issue number or --batch list"
+		return 2
+	fi
+	if [[ -z "$repo_slug" ]]; then
+		repo_slug=$(_launch_worker_default_repo) || {
+			print_error "Could not infer owner/repo from git remote; pass it explicitly"
+			return 2
+		}
+	fi
+	if [[ ! "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+		print_error "Repo slug must be owner/repo format: $repo_slug"
+		return 2
+	fi
+
+	local old_ifs="$IFS"
+	IFS=','
+	local -a issues=()
+	read -r -a issues <<<"$issue_spec"
+	IFS="$old_ifs"
+
+	local helper_path
+	helper_path=$(_launch_worker_helper_path) || return 1
+
+	local issue rc=0
+	for issue in "${issues[@]}"; do
+		if [[ ! "$issue" =~ ^[0-9]+$ ]]; then
+			print_error "Issue number must be numeric: $issue"
+			rc=2
+			continue
+		fi
+		bash "$helper_path" dispatch "$issue" "$repo_slug" "${helper_opts[@]}" || rc=$?
+		echo "Status: maestro launch-worker status $issue $repo_slug"
+	done
+	return "$rc"
+}
+
+# Emit tip if the current directory has maestro but isn't registered
+_main_check_unregistered() {
+	local command="$1"
+	local unregistered
+	unregistered=$(detect_unregistered_repo 2>/dev/null) || true
+	if [[ -n "$unregistered" && "$command" != "detect" && "$command" != "repos" ]]; then
+		echo -e "${YELLOW}[TIP]${NC} This project uses maestro but isn't registered. Run: maestro repos add"
+		echo ""
+	fi
+	return 0
+}
+
+# Warn when CLI and agents versions differ
+_main_check_version() {
+	local cli_version agents_version
+	cli_version=$(get_version)
+	[[ -f "$AGENTS_DIR/VERSION" ]] && agents_version=$(cat "$AGENTS_DIR/VERSION") || agents_version="not installed"
+	if [[ "$agents_version" == "not installed" ]]; then
+		echo -e "${YELLOW}[WARN]${NC} Agents not installed. Run: maestro update"
+		echo ""
+	elif [[ "$cli_version" != "$agents_version" ]]; then
+		echo -e "${YELLOW}[WARN]${NC} Version mismatch - CLI: $cli_version, Agents: $agents_version"
+		echo -e "       Run: maestro update"
+		echo ""
+	fi
+	return 0
+}
+
+# Route 'maestro security [subcommand]' to appropriate helpers
+_cmd_security() {
+	case "${1:-}" in
+	"")
+		# No args: run ALL security checks (posture + hygiene + advisories)
+		echo ""
+		echo "Running full security assessment..."
+		echo "==================================="
+		echo ""
+		_dispatch_helper "security-posture-helper.sh" "security-posture-helper.sh" status || true
+		echo ""
+		_dispatch_helper "secret-hygiene-helper.sh" "secret-hygiene-helper.sh" scan || true
+		echo ""
+		_dispatch_helper "supply-chain-advisory-helper.sh" "supply-chain-advisory-helper.sh" scan || true
+		;;
+	scan | scan-secrets | scan-pth | scan-deps)
+		_dispatch_helper "secret-hygiene-helper.sh" "secret-hygiene-helper.sh" "$@"
+		;;
+	dismiss)
+		if [[ "${2:-}" == "tanstack-minishaihulud-2026-05" ]]; then
+			_dispatch_helper "supply-chain-advisory-helper.sh" "supply-chain-advisory-helper.sh" dismiss
+		else
+			_dispatch_helper "secret-hygiene-helper.sh" "secret-hygiene-helper.sh" "$@"
+		fi
+		;;
+	hygiene)
+		shift
+		_dispatch_helper "secret-hygiene-helper.sh" "secret-hygiene-helper.sh" "${@:-scan}"
+		;;
+	posture | setup)
+		shift || true
+		_dispatch_helper "security-posture-helper.sh" "security-posture-helper.sh" "${@:-setup}"
+		;;
+	status)
+		# Status shows both posture and hygiene summary
+		_dispatch_helper "security-posture-helper.sh" "security-posture-helper.sh" status || true
+		echo ""
+		_dispatch_helper "secret-hygiene-helper.sh" "secret-hygiene-helper.sh" startup-check || true
+		echo ""
+		_dispatch_helper "supply-chain-advisory-helper.sh" "supply-chain-advisory-helper.sh" startup-check || true
+		;;
+	supply-chain)
+		shift || true
+		_dispatch_helper "supply-chain-advisory-helper.sh" "supply-chain-advisory-helper.sh" "${@:-scan}"
+		;;
+	*)
+		_dispatch_helper "security-posture-helper.sh" "security-posture-helper.sh" "$@"
+		;;
+	esac
+	return 0
+}
+
+# Route 'maestro email [subcommand]' to email helpers
+_cmd_email() {
+	local sub="${1:-help}"
+	local _EPH="email-poll-helper.sh"
+	shift || true
+	case "$sub" in
+	mailbox)
+		local action="${1:-list}"
+		shift || true
+		local _EMR_HELPER="email-mailbox-register-helper.sh"
+		case "$action" in
+		add)      _dispatch_helper "$_EMR_HELPER" "$_EMR_HELPER" add "$@" ;;
+		list)     _dispatch_helper "$_EPH" "$_EPH" list "$@" ;;
+		test)     _dispatch_helper "$_EPH" "$_EPH" test "$@" ;;
+		remove)   _dispatch_helper "$_EMR_HELPER" "$_EMR_HELPER" remove "$@" ;;
+		*)
+			echo "Usage: maestro email mailbox <add|list|test|remove>"
+			echo ""
+			echo "Mailbox subcommands:"
+			echo "  add           Interactive: prompt for provider, user, gopass path; test connection"
+			echo "  list          Table of mailboxes with last-polled-at and last-error"
+			echo "  test <id>     Dry-run fetch (1 message); does not commit state"
+			echo "  remove <id>   Un-register a mailbox"
+			;;
+		esac
+		;;
+	poll)
+		# Direct poll commands forwarded to email-poll-helper.sh
+		local poll_action="${1:-tick}"
+		shift || true
+		_dispatch_helper "$_EPH" "$_EPH" "$poll_action" "$@" ;;
+	thread)
+		# Thread lookup: email thread <message-id> [knowledge-root]
+		local _ETH="email-thread-helper.sh"
+		_dispatch_helper "$_ETH" "$_ETH" thread "$@" ;;
+	build)
+		# Thread rebuild: email build [knowledge-root] [--force]
+		local _ETH2="email-thread-helper.sh"
+		_dispatch_helper "$_ETH2" "$_ETH2" build "$@" ;;
+	filter)
+		# Filter rules: email filter tick|add|test|list [knowledge-root]
+		local _EFH="email-filter-helper.sh"
+		[[ $# -eq 0 ]] && set -- list
+		_dispatch_helper "$_EFH" "$_EFH" "$@" ;;
+	*)
+		echo "Usage: maestro email <mailbox|poll|thread|build|filter> [subcommand]"
+		echo ""
+		echo "Email subcommands:"
+		echo "  mailbox add              Register a new IMAP mailbox (interactive)"
+		echo "  mailbox list             Show all mailboxes + polling status"
+		echo "  mailbox test <id>        Dry-run connection test"
+		echo "  mailbox remove <id>      Un-register a mailbox"
+		echo "  poll tick                Poll all mailboxes now (same as routine r044)"
+		echo "  poll backfill <id>       Backfill a mailbox from a given date"
+		echo "  thread <message-id>      Look up thread by message-id"
+		echo "  build [--force]          Rebuild thread index from email sources"
+		echo "  filter list              List filter rules"
+		echo "  filter add               Add a new filter rule (interactive)"
+		echo "  filter test <rule>       Dry-run rule against last 50 sources"
+		echo "  filter tick              Run filter pass (routine r045)"
+		;;
+	esac
+	return 0
+}
+
+# Route 'maestro client-format [subcommand]' to appropriate helpers
+_cmd_client_format() {
+	case "${1:-status}" in
+	extract | refresh)
+		_dispatch_helper "cch-extract.sh" "cch-extract.sh" --cache
+		;;
+	check | verify)
+		_dispatch_helper "cch-extract.sh" "cch-extract.sh" --verify
+		;;
+	canary | test)
+		shift || true
+		_dispatch_helper "cch-canary.sh" "cch-canary.sh" --verbose "$@"
+		;;
+	monitor)
+		shift || true
+		_dispatch_helper "cch-traffic-monitor.sh" "cch-traffic-monitor.sh" "$@"
+		;;
+	install-canary)
+		_dispatch_helper "cch-canary.sh" "cch-canary.sh" --install
+		;;
+	status | "")
+		echo ""
+		echo "Client request format alignment"
+		echo "==============================="
+		echo ""
+		_dispatch_helper "cch-extract.sh" "cch-extract.sh" --verify 2>&1 || true
+		echo ""
+		if [[ -f "$HOME/.maestro/cch-constants.json" ]]; then
+			echo "Cached constants:"
+			cat "$HOME/.maestro/cch-constants.json"
+		else
+			echo "No cached constants. Run: maestro client-format extract"
+		fi
+		;;
+	*)
+		print_error "Unknown subcommand: $1"
+		echo "Usage: maestro client-format [extract|check|canary|monitor|install-canary|status]"
+		exit 1
+		;;
+	esac
+	return 0
+}
+
+# Main entry point
+main() {
+	local command="${1:-help}"
+
+	# Auto-detect unregistered repo on any command (silent check)
+	_main_check_unregistered "$command"
+
+	# Check if agents need updating (skip for update command itself)
+	if [[ "$command" != "update" && "$command" != "upgrade" && "$command" != "u" ]]; then
+		_main_check_version
+	fi
+
+	shift || true
+	case "$command" in
+	init | i) cmd_init "$@" ;;
+	setup) cmd_setup "$@" ;;
+	features | f) cmd_features ;;
+	status | s) cmd_status ;;
+	update | upgrade | u) cmd_update "$@" ;;
+	auto-update | autoupdate) _dispatch_helper "auto-update-helper.sh" "auto-update-helper.sh" "$@" ;;
+	repo-sync | reposync) _dispatch_helper "repo-sync-helper.sh" "repo-sync-helper.sh" "$@" ;;
+	update-tools | tools) cmd_update_tools "$@" ;;
+	upgrade-planning | up) cmd_upgrade_planning "$@" ;;
+	repos | projects) cmd_repos "$@" ;;
+	design) _dispatch_helper "design-guidelines-helper.sh" "design-guidelines-helper.sh" "$@" ;;
+	skill) cmd_skill "$@" ;;
+	skills) cmd_skills "$@" ;;
+	sources | agent-sources) _dispatch_helper "agent-sources-helper.sh" "agent-sources-helper.sh" "$@" ;;
+	plugin | plugins) cmd_plugin "$@" ;;
+	pulse) _dispatch_helper "pulse-session-helper.sh" "pulse-session-helper.sh" "$@" ;;
+	launch-worker | launch_worker) cmd_launch_worker "$@" ;;
+	check-workflows | workflows) _dispatch_helper "check-workflows-helper.sh" "check-workflows-helper.sh" "$@" ;;
+	sync-workflows) _dispatch_helper "sync-workflows-helper.sh" "sync-workflows-helper.sh" "$@" ;;
+	metrics) _dispatch_helper "repo-metrics-helper.sh" "repo-metrics-helper.sh" "$@" ;;
+	badges)
+		# Badge management: render | check | sync | install (t2975)
+		# Bare 'maestro badges' with no subcommand shows a usage summary.
+		# Subcommands:
+		#   render <slug>               — render canonical badge block for a repo
+		#   check  [--repo SLUG] [--json] [--verbose]  — cross-repo drift check
+		#   sync   [--repo SLUG] [--apply]              — inject badge block + generate metrics + install workflow
+		#   install [--repo SLUG] [--apply]             — install repo metrics refresh workflow only
+		local _badges_sub="${1:-help}"
+		local _badges_check_h="badges-check-helper.sh"
+		local _badges_sync_h="badges-sync-helper.sh"
+		case "$_badges_sub" in
+		render)
+			shift
+			local _render_helper
+			_render_helper=$(bash -c '
+				d="$HOME/.maestro/agents/scripts/readme-badges-helper.sh"
+				l="'"$AGENTS_DIR"'/scripts/readme-badges-helper.sh"
+				[[ -f "$d" ]] && echo "$d" || echo "$l"
+			')
+			if [[ -f "$_render_helper" ]]; then
+				bash "$_render_helper" render "$@"
+			else
+				print_error "readme-badges-helper.sh not found. Run: maestro update"
+				exit 1
+			fi
+			;;
+		check)
+			shift
+			_dispatch_helper "$_badges_check_h" "$_badges_check_h" "$@"
+			;;
+		sync)
+			shift
+			_dispatch_helper "$_badges_sync_h" "$_badges_sync_h" "$@"
+			;;
+		install)
+			shift
+			_dispatch_helper "$_badges_sync_h" "$_badges_sync_h" --workflow-only "$@"
+			;;
+		help | --help | -h | "")
+			echo ""
+			echo "maestro badges — README badge block and repo metrics workflow management (t2975)"
+			echo ""
+			echo "Subcommands:"
+			echo "  render  <slug>                 Print canonical badge block for a repo"
+			echo "  check   [--repo SLUG] [--json]  Detect badge drift across managed repos"
+			echo "  sync    [--repo SLUG] [--apply] Inject badge block + generate metrics + install workflow"
+			echo "  install [--repo SLUG] [--apply] Install repo metrics refresh workflow only"
+			echo ""
+			echo "Options (check/sync/install):"
+			echo "  --repo SLUG    Limit to a single repo"
+			echo "  --apply        Actually perform the sync (default: dry-run)"
+			echo "  --json         Machine-readable output"
+			echo "  --verbose      Show diff summaries (check only)"
+			echo ""
+			echo "Examples:"
+			echo "  maestro badges check                       # scan all repos for badge drift"
+			echo "  maestro badges check --json | jq '.[]'    # machine-readable output"
+			echo "  maestro badges render owner/repo           # print badge block"
+			echo "  maestro badges sync                        # dry-run sync across all repos"
+			echo "  maestro badges sync --repo owner/r --apply # apply to a single repo"
+			echo "  maestro metrics generate [PATH]            # generate local docs/metrics artifacts"
+			echo ""
+			;;
+		*)
+			print_error "Unknown badges subcommand: $_badges_sub (try render|check|sync|install|help)"
+			exit 1
+			;;
+		esac
+		;;
+	security) _cmd_security "$@" ;;
+	doctor | doc) _dispatch_helper "doctor-helper.sh" "doctor-helper.sh" "$@" ;;
+	detect | scan) cmd_detect ;;
+	ip-check | ip_check) _dispatch_helper "ip-reputation-helper.sh" "ip-reputation-helper.sh" "$@" ;;
+	model-accounts-pool | map) _dispatch_helper "oauth-pool-helper.sh" "oauth-pool-helper.sh" "$@" ;;
+	cleanup)
+		local _cleanup_sub="${1:-help}"
+		case "$_cleanup_sub" in
+		branches | remote-branches)
+			shift || true
+			_dispatch_helper "remote-branch-cleanup-helper.sh" "remote-branch-cleanup-helper.sh" "$_cleanup_sub" "$@"
+			;;
+		help | --help | -h | "")
+			echo "Usage: maestro cleanup <branches|remote-branches> [options]"
+			echo ""
+			echo "Cleanup commands:"
+			echo "  branches          Audit stale remote branches (dry-run default)"
+			echo "  remote-branches   Alias for branches"
+			echo ""
+			echo "Options:"
+			echo "  --repo PATH       Repository path (default: current directory)"
+			echo "  --remote NAME     Remote to audit (default: origin)"
+			echo "  --apply           Delete safe candidates"
+			echo ""
+			;;
+		*)
+			print_error "Unknown cleanup subcommand: $_cleanup_sub (try branches|remote-branches|help)"
+			exit 1
+			;;
+		esac
+		;;
+	client-format) _cmd_client_format "$@" ;;
+	github-app-auth | github-app | gh-auth) _dispatch_helper "github-app-auth-helper.sh" "github-app-auth-helper.sh" "$@" ;;
+	opencode-db | oc-db) _dispatch_helper "opencode-db-maintenance-helper.sh" "opencode-db-maintenance-helper.sh" "$@" ;;
+	opencode | oc) _dispatch_helper "opencode-launcher-helper.sh" "opencode-launcher-helper.sh" "$@" ;;
+	opencode-desktop | oc-desktop) _dispatch_helper "opencode-launcher-helper.sh" "opencode-launcher-helper.sh" desktop "$@" ;;
+	opencode-sandbox | oc-sandbox) _dispatch_helper "opencode-sandbox-helper.sh" "opencode-sandbox-helper.sh" "$@" ;;
+	review-gate | review_gate) _dispatch_helper "review-gate-config-helper.sh" "review-gate-config-helper.sh" "$@" ;;
+	secret | secrets) _dispatch_helper "secret-helper.sh" "secret-helper.sh" "$@" ;;
+	vault) _dispatch_helper "vault-helper.sh" "vault-helper.sh" "$@" ;;
+	approve) _dispatch_helper "approval-helper.sh" "approval-helper.sh" "$@" ;;
+	circuit-breaker | circuit_breaker | cb)
+		# Supervisor circuit breaker control (t1331). Bare invocation defaults to status.
+		# Subcommands forward verbatim: check | status | record-failure | record-success | reset | trip | help
+		[[ $# -eq 0 ]] && set -- status
+		_dispatch_helper "circuit-breaker-helper.sh" "circuit-breaker-helper.sh" "$@"
+		;;
+	worktree | wt) _dispatch_helper "worktree-helper.sh" "worktree-helper.sh" "$@" ;;
+	issue) _dispatch_helper "interactive-session-helper.sh" "interactive-session-helper.sh" "$@" ;;
+	signing) _dispatch_helper "signing-setup.sh" "signing-setup.sh" "$@" ;;
+	contributions | contrib)
+		# Bare `maestro contributions` defaults to status (most common use).
+		# Other subcommands (seed, scan, stop, restart, install, uninstall) forward verbatim.
+		[[ $# -eq 0 ]] && set -- status
+		_dispatch_helper "contribution-watch-helper.sh" "contribution-watch-helper.sh" "$@"
+		;;
+	inbox)
+		# Bare `maestro inbox` defaults to status (most common use).
+		[[ $# -eq 0 ]] && set -- status
+		_dispatch_helper "inbox-helper.sh" "inbox-helper.sh" "$@"
+		;;
+	case | cases)
+		# Bare `maestro case` defaults to list (most common use).
+		[[ $# -eq 0 ]] && set -- list
+		# alarm-test subcommand routes to case-alarm-helper.sh
+		if [[ "${1:-}" == "alarm-test" ]]; then
+			shift
+			_dispatch_helper "case-alarm-helper.sh" "case-alarm-helper.sh" alarm-test "$@"
+		else
+			_dispatch_helper "case-helper.sh" "case-helper.sh" "$@"
+		fi
+		;;
+	email) _cmd_email "$@" ;;
+	stats | observability) _dispatch_helper "observability-helper.sh" "observability-helper.sh" "$@" ;;
+	tabby) _dispatch_helper "tabby-helper.sh" "tabby-helper.sh" "$@" ;;
+	init-routines) _dispatch_helper "init-routines-helper.sh" "init-routines-helper.sh" "$@" ;;
+	parent-status | ps) _dispatch_helper "parent-status-helper.sh" "parent-status-helper.sh" "$@" ;;
+	knowledge) _dispatch_helper "knowledge-helper.sh" "knowledge-helper.sh" "$@" ;;
+	campaign | campaigns)
+		# P1 provisioning: init/provision/status/ls → campaigns-provision-helper.sh
+		# P4 asset binary: asset → campaign-asset-helper.sh
+		# P2+P6: all other subcommands → campaign-helper.sh
+		local _camp_cmd="${1:-help}"
+		case "$_camp_cmd" in
+		init | provision | ls)
+			_dispatch_helper "campaigns-provision-helper.sh" "campaigns-provision-helper.sh" "$@"
+			;;
+		status)
+			if [[ $# -le 1 || -d "${2:-}" || "${2:-}" == .* || "${2:-}" == /* || "${2:-}" == ~* ]]; then
+				_dispatch_helper "campaigns-provision-helper.sh" "campaigns-provision-helper.sh" "$@"
+			else
+				_dispatch_helper "campaign-helper.sh" "campaign-helper.sh" "$@"
+			fi
+			;;
+		asset | assets)
+			shift
+			_dispatch_helper "campaign-asset-helper.sh" "campaign-asset-helper.sh" "$@"
+			;;
+		*)
+			_dispatch_helper "campaign-helper.sh" "campaign-helper.sh" "$@"
+			;;
+		esac
+		;;
+	reach) _dispatch_helper "reach-helper.sh" "reach-helper.sh" "$@" ;;
+	config | configure) _dispatch_config "$@" ;;
+	uninstall | remove) cmd_uninstall ;;
+	version | v | -v | --version) cmd_version ;;
+	help | h | -h | --help) cmd_help ;;
+	*)
+		print_error "Unknown command: $command"
+		echo ""
+		cmd_help
+		exit 1
+		;;
+	esac
+}
+
+main "$@"

@@ -1,0 +1,1 @@
+../../services/email/email-test-suite.md

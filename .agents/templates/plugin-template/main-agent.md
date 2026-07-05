@@ -1,0 +1,47 @@
+---
+tools:
+  - bash
+  - read
+  - edit
+  - write
+model: sonnet
+---
+
+<!-- SPDX-License-Identifier: MIT -->
+<!-- SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest -->
+
+# {{PLUGIN_NAME}}
+
+{{PLUGIN_DESCRIPTION}}
+
+## Quick Reference
+
+- **Purpose**: {{PLUGIN_DESCRIPTION}}
+- **Namespace**: `{{NAMESPACE}}`
+- **Requires**: maestro framework (`~/.maestro/agents/` must exist)
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `/{{NAMESPACE}}-help` | Show available commands |
+
+## Subagents
+
+| File | Purpose |
+|------|---------|
+| `{{NAMESPACE}}/example.md` | Example subagent |
+
+## Workflow
+
+1. Step one
+2. Step two
+3. Step three
+
+## Integration
+
+This plugin integrates with the maestro framework:
+
+- Uses `~/.config/maestro/credentials.sh` for API keys
+- Follows maestro agent conventions (YAML frontmatter, progressive disclosure)
+- Compatible with supervisor dispatch and headless workers

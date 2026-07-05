@@ -1,0 +1,1 @@
+../../seo/seo-agent-discovery.md

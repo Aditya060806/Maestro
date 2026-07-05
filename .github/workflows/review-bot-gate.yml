@@ -1,0 +1,61 @@
+name: Review Bot Gate
+
+# Self-caller for the maestro repo.
+# Upstream logic: .github/workflows/review-bot-gate-reusable.yml
+# Downstream template: .agents/templates/workflows/review-bot-gate-caller.yml
+# See: .agents/reference/reusable-workflows.md
+#
+# GH#20727: migrated to reusable-workflow pattern. The helper script is now
+# fetched at runtime from Aditya060806/Maestro@main rather than being pinned
+# to a hard-coded SHA that silently drifts after helper changes.
+#
+# To enforce: add "review-bot-gate" as a required status check in
+# GitHub branch protection settings for each repo.
+#
+# Rate-limit behaviour: controlled by `review_gate.rate_limit_behavior` in
+# ~/.config/maestro/repos.json. Default: "pass". See:
+# .agents/reference/repos-json-fields.md "review_gate" field.
+#
+# t1382: https://github.com/Aditya060806/Maestro/issues/2735
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    # edited re-triggers when CodeRabbit finalises its Phase 1 placeholder (t2139).
+    # Without this trigger, the settlement check would only fire on new comments,
+    # not on the Phase 2 edit that makes the placeholder a real review.
+    types: [created, edited]
+
+# Do NOT cancel in-progress runs. When cancel-in-progress was true, the initial
+# pull_request:opened run was cancelled by the issue_comment:created event (fired
+# when a bot posted). The cancelled run left a permanent stale CANCELLED check on
+# the PR, making mergeStateStatus UNSTABLE even though the re-triggered run passed.
+# With cancel-in-progress: false, both runs complete — the first passes early
+# (PR too young) and the second confirms the bot posted. GH#2973.
+concurrency:
+  group: review-bot-gate-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # issue_comment fires for every PR comment/edit. Only bot review comments can
+    # change this gate's verdict; maintainer/user discussion should be skipped
+    # before the reusable workflow starts so it does not create mobile run noise.
+    if: >
+      github.event_name != 'issue_comment' ||
+      (
+        github.event.issue.pull_request &&
+        (
+          github.actor == 'coderabbitai' ||
+          github.actor == 'gemini-code-assist[bot]' ||
+          github.actor == 'augment-code[bot]' ||
+          github.actor == 'augmentcode[bot]' ||
+          github.actor == 'copilot[bot]' ||
+          github.actor == 'github-actions[bot]'
+        )
+      )
+    uses: ./.github/workflows/review-bot-gate-reusable.yml
+    secrets: inherit

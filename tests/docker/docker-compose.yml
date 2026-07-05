@@ -1,0 +1,14 @@
+# Test orchestration for setup scripts
+services:
+  test:
+    build: .
+    volumes:
+      - ../../:/home/testuser/Git/maestro:ro
+    command: ["/home/testuser/Git/maestro/tests/docker/run-tests.sh"]
+
+  shell:
+    build: .
+    volumes:
+      - ../../:/home/testuser/Git/maestro
+    stdin_open: true
+    tty: true

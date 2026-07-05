@@ -1,0 +1,1 @@
+../../seo/seo-optimize.md

@@ -1,0 +1,819 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit
+SOURCE_HELPER="${SCRIPT_DIR}/../profile-readme-helper.sh"
+SOURCE_DATA_LIB="${SCRIPT_DIR}/../profile-readme-data-lib.sh"
+SOURCE_RENDER_LIB="${SCRIPT_DIR}/../profile-readme-render-lib.sh"
+
+readonly TEST_RED='\033[0;31m'
+readonly TEST_GREEN='\033[0;32m'
+readonly RESET='\033[0m'
+
+TESTS_RUN=0
+TESTS_PASSED=0
+TESTS_FAILED=0
+
+TEST_DIR=""
+
+print_result() {
+	local test_name="$1"
+	local result="$2"
+	local message="${3:-}"
+
+	TESTS_RUN=$((TESTS_RUN + 1))
+
+	if [[ "$result" -eq 0 ]]; then
+		echo -e "${TEST_GREEN}PASS${RESET} ${test_name}"
+		TESTS_PASSED=$((TESTS_PASSED + 1))
+	else
+		echo -e "${TEST_RED}FAIL${RESET} ${test_name}"
+		if [[ -n "$message" ]]; then
+			echo "       ${message}"
+		fi
+		TESTS_FAILED=$((TESTS_FAILED + 1))
+	fi
+
+	return 0
+}
+
+install_helper_with_libs() {
+	local helper_dir="$1"
+	local helper_path="${helper_dir}/profile-readme-helper.sh"
+	cp "${SOURCE_HELPER}" "${helper_path}"
+	chmod +x "${helper_path}"
+	cp "${SOURCE_DATA_LIB}" "${helper_dir}/profile-readme-data-lib.sh"
+	cp "${SOURCE_RENDER_LIB}" "${helper_dir}/profile-readme-render-lib.sh"
+	return 0
+}
+
+write_stub_dependencies() {
+	local stub_dir="$1"
+
+	cat >"${stub_dir}/screen-time-helper.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "profile-stats" ]]; then
+	printf '%s\n' '{"today_hours":1.0,"week_hours":2.0,"month_hours":3.0,"year_hours":4.0}'
+else
+	printf '%s\n' '{}'
+fi
+return 0 2>/dev/null || exit 0
+EOF
+
+	cat >"${stub_dir}/contributor-activity-helper.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "session-time" ]]; then
+	printf '%s\n' '{"interactive_human_hours":1.0,"worker_human_hours":2.0,"worker_machine_hours":3.0,"total_human_hours":4.0,"total_machine_hours":5.0,"interactive_sessions":6,"worker_sessions":7}'
+else
+	printf '%s\n' '{}'
+fi
+return 0 2>/dev/null || exit 0
+EOF
+
+	chmod +x "${stub_dir}/screen-time-helper.sh" "${stub_dir}/contributor-activity-helper.sh"
+	return 0
+}
+
+create_profile_repo_fixture() {
+	local fixture_home="$1"
+	local profile_repo="$2"
+	local remote_repo="$3"
+
+	mkdir -p "${fixture_home}/.config/maestro"
+	mkdir -p "${fixture_home}/.maestro/.agent-workspace/observability"
+
+	cat >"${fixture_home}/.config/maestro/repos.json" <<EOF
+{
+  "initialized_repos": [
+    {
+      "path": "${profile_repo}",
+      "slug": "fixture/fixture",
+      "priority": "profile",
+      "pulse": false,
+      "maintainer": "fixture"
+    }
+  ]
+}
+EOF
+
+	git init --bare --initial-branch=main "${remote_repo}" >/dev/null
+	git init -b main "${profile_repo}" >/dev/null
+	git -C "${profile_repo}" config user.name "Fixture"
+	git -C "${profile_repo}" config user.email "fixture@example.com"
+	git -C "${profile_repo}" config commit.gpgsign false
+	git -C "${profile_repo}" remote add origin "${remote_repo}"
+
+	cat >"${profile_repo}/README.md" <<'EOF'
+# Fixture Profile
+
+![ManualBadgeA](https://example.com/a.svg)
+![ManualBadgeB](https://example.com/b.svg)
+
+Manual preface block that must not be rewritten.
+
+<!-- STATS-START -->
+Old stats block
+<!-- STATS-END -->
+
+Manual suffix block that must not be rewritten.
+
+## Connect
+
+- Stay in touch
+
+<!-- UPDATED-START -->
+Old timestamp
+<!-- UPDATED-END -->
+EOF
+
+	git -C "${profile_repo}" add README.md
+	git -C "${profile_repo}" commit -m "feat: seed fixture readme" >/dev/null
+	git -C "${profile_repo}" push -u origin main >/dev/null
+
+	return 0
+}
+
+strip_dynamic_sections() {
+	local file_path="$1"
+	awk '
+		/<!-- STATS-START -->/ { print; skip_stats = 1; next }
+		/<!-- STATS-END -->/ { skip_stats = 0; print; next }
+		/<!-- UPDATED-START -->/ { print; skip_updated = 1; next }
+		/<!-- UPDATED-END -->/ { skip_updated = 0; print; next }
+		!skip_stats && !skip_updated { print }
+	' "$file_path"
+	return 0
+}
+
+test_update_preserves_manual_sections() {
+	local test_name="profile update preserves non-marker sections"
+
+	TEST_DIR=$(mktemp -d)
+	local fixture_home="${TEST_DIR}/home"
+	local fixture_repo="${TEST_DIR}/profile-repo"
+	local fixture_remote="${TEST_DIR}/profile-remote.git"
+	local helper_dir="${TEST_DIR}/helper"
+	local helper_path="${helper_dir}/profile-readme-helper.sh"
+
+	mkdir -p "${helper_dir}" "${fixture_home}"
+	install_helper_with_libs "${helper_dir}"
+
+	write_stub_dependencies "${helper_dir}"
+	create_profile_repo_fixture "${fixture_home}" "${fixture_repo}" "${fixture_remote}"
+
+	local before_file="${TEST_DIR}/before.md"
+	local after_file="${TEST_DIR}/after.md"
+	cp "${fixture_repo}/README.md" "${before_file}"
+
+	if ! HOME="${fixture_home}" bash "${helper_path}" update >/dev/null 2>&1; then
+		print_result "${test_name}" 1 "helper update command failed"
+		return 0
+	fi
+
+	cp "${fixture_repo}/README.md" "${after_file}"
+
+	local before_static
+	local after_static
+	before_static="$(strip_dynamic_sections "${before_file}")"
+	after_static="$(strip_dynamic_sections "${after_file}")"
+
+	if [[ "${before_static}" != "${after_static}" ]]; then
+		print_result "${test_name}" 1 "content outside STATS/UPDATED markers changed"
+		return 0
+	fi
+
+	if ! grep -q 'ManualBadgeA' "${after_file}" || ! grep -q 'ManualBadgeB' "${after_file}"; then
+		print_result "${test_name}" 1 "manual badge lines missing after update"
+		return 0
+	fi
+
+	print_result "${test_name}" 0
+	return 0
+}
+
+teardown() {
+	if [[ -n "${TEST_DIR}" && -d "${TEST_DIR}" ]]; then
+		rm -rf "${TEST_DIR}"
+	fi
+	TEST_DIR=""
+	return 0
+}
+
+test_inject_markers_into_existing_readme() {
+	local test_name="inject markers into README without markers"
+
+	TEST_DIR=$(mktemp -d)
+	local fixture_home="${TEST_DIR}/home"
+	local fixture_repo="${TEST_DIR}/profile-repo"
+	local fixture_remote="${TEST_DIR}/profile-remote.git"
+	local helper_dir="${TEST_DIR}/helper"
+	local helper_path="${helper_dir}/profile-readme-helper.sh"
+
+	mkdir -p "${helper_dir}" "${fixture_home}/.config/maestro"
+	mkdir -p "${fixture_home}/.maestro/.agent-workspace/observability"
+	install_helper_with_libs "${helper_dir}"
+	write_stub_dependencies "${helper_dir}"
+
+	# Create a bare remote and local clone with NO markers
+	git init --bare --initial-branch=main "${fixture_remote}" >/dev/null
+	git init -b main "${fixture_repo}" >/dev/null
+	git -C "${fixture_repo}" config user.name "Fixture"
+	git -C "${fixture_repo}" config user.email "fixture@example.com"
+	git -C "${fixture_repo}" config commit.gpgsign false
+	git -C "${fixture_repo}" remote add origin "${fixture_remote}"
+
+	# Write a user-authored README without any maestro markers
+	cat >"${fixture_repo}/README.md" <<'EOF'
+# Hi there
+
+I'm a developer who likes building things.
+
+## My Projects
+
+- Project A
+- Project B
+EOF
+
+	git -C "${fixture_repo}" add README.md
+	git -C "${fixture_repo}" commit -m "Initial commit" >/dev/null
+	git -C "${fixture_repo}" push -u origin main >/dev/null
+
+	# Set up repos.json pointing to this repo
+	cat >"${fixture_home}/.config/maestro/repos.json" <<EOF
+{
+  "initialized_repos": [
+    {
+      "path": "${fixture_repo}",
+      "slug": "fixture/fixture",
+      "priority": "profile",
+      "pulse": false,
+      "maintainer": "fixture"
+    }
+  ]
+}
+EOF
+
+	# Run update — should inject markers and then update stats
+	if ! HOME="${fixture_home}" bash "${helper_path}" update >/dev/null 2>&1; then
+		print_result "${test_name}" 1 "helper update command failed"
+		return 0
+	fi
+
+	local readme="${fixture_repo}/README.md"
+
+	# Verify markers were injected
+	if ! grep -q '<!-- STATS-START -->' "$readme"; then
+		print_result "${test_name}" 1 "STATS-START marker not found after update"
+		return 0
+	fi
+	if ! grep -q '<!-- STATS-END -->' "$readme"; then
+		print_result "${test_name}" 1 "STATS-END marker not found after update"
+		return 0
+	fi
+
+	# Verify original content was preserved
+	if ! grep -q 'Hi there' "$readme"; then
+		print_result "${test_name}" 1 "original heading lost after marker injection"
+		return 0
+	fi
+	if ! grep -q 'Project A' "$readme"; then
+		print_result "${test_name}" 1 "original content lost after marker injection"
+		return 0
+	fi
+
+	print_result "${test_name}" 0
+	return 0
+}
+
+test_diverged_history_recovery() {
+	local test_name="recover from diverged git history"
+
+	TEST_DIR=$(mktemp -d)
+	local fixture_home="${TEST_DIR}/home"
+	local fixture_repo="${TEST_DIR}/profile-repo"
+	local fixture_remote="${TEST_DIR}/profile-remote.git"
+	local helper_dir="${TEST_DIR}/helper"
+	local helper_path="${helper_dir}/profile-readme-helper.sh"
+
+	mkdir -p "${helper_dir}" "${fixture_home}/.config/maestro"
+	mkdir -p "${fixture_home}/.maestro/.agent-workspace/observability"
+	install_helper_with_libs "${helper_dir}"
+	write_stub_dependencies "${helper_dir}"
+
+	# Create initial remote and local clone with markers
+	git init --bare --initial-branch=main "${fixture_remote}" >/dev/null
+	git init -b main "${fixture_repo}" >/dev/null
+	git -C "${fixture_repo}" config user.name "Fixture"
+	git -C "${fixture_repo}" config user.email "fixture@example.com"
+	git -C "${fixture_repo}" config commit.gpgsign false
+	git -C "${fixture_repo}" remote add origin "${fixture_remote}"
+
+	cat >"${fixture_repo}/README.md" <<'EOF'
+# Profile
+
+<!-- STATS-START -->
+Old stats
+<!-- STATS-END -->
+
+<!-- UPDATED-START -->
+<!-- UPDATED-END -->
+EOF
+
+	git -C "${fixture_repo}" add README.md
+	git -C "${fixture_repo}" commit -m "feat: seed readme" >/dev/null
+	git -C "${fixture_repo}" push -u origin main >/dev/null
+
+	# Simulate repo deletion and recreation: create a NEW remote with different history
+	rm -rf "${fixture_remote}"
+	git init --bare --initial-branch=main "${fixture_remote}" >/dev/null
+
+	# Push a different initial commit to the new remote (simulating GitHub "Initial commit")
+	local tmp_clone="${TEST_DIR}/tmp-clone"
+	git clone "${fixture_remote}" "${tmp_clone}" 2>/dev/null
+	git -C "${tmp_clone}" config user.name "GitHub"
+	git -C "${tmp_clone}" config user.email "noreply@github.com"
+	git -C "${tmp_clone}" config commit.gpgsign false
+	echo "# fixture" >"${tmp_clone}/README.md"
+	git -C "${tmp_clone}" add README.md
+	git -C "${tmp_clone}" commit -m "Initial commit" >/dev/null
+	git -C "${tmp_clone}" push -u origin main >/dev/null
+	rm -rf "${tmp_clone}"
+
+	# Set up repos.json
+	cat >"${fixture_home}/.config/maestro/repos.json" <<EOF
+{
+  "initialized_repos": [
+    {
+      "path": "${fixture_repo}",
+      "slug": "fixture/fixture",
+      "priority": "profile",
+      "pulse": false,
+      "maintainer": "fixture"
+    }
+  ]
+}
+EOF
+
+	# Run update — should detect diverged history and recover
+	HOME="${fixture_home}" bash "${helper_path}" update >/dev/null 2>&1 || true
+
+	local readme="${fixture_repo}/README.md"
+
+	# After recovery, the README should have markers (either injected or from re-seed)
+	if ! grep -q '<!-- STATS-START -->' "$readme" 2>/dev/null; then
+		print_result "${test_name}" 1 "STATS-START marker not found after recovery"
+		return 0
+	fi
+
+	# Verify the local repo can now push to the remote (histories are aligned)
+	if ! git -C "${fixture_repo}" push origin main 2>/dev/null; then
+		# Try with --force since recovery may have created a new commit
+		if ! git -C "${fixture_repo}" push --force origin main 2>/dev/null; then
+			print_result "${test_name}" 1 "still cannot push after recovery"
+			return 0
+		fi
+	fi
+
+	print_result "${test_name}" 0
+	return 0
+}
+
+test_default_template_replaced_with_rich_readme() {
+	local test_name="default GitHub template replaced with rich profile README"
+
+	TEST_DIR=$(mktemp -d)
+	local fixture_home="${TEST_DIR}/home"
+	local fixture_repo="${TEST_DIR}/profile-repo"
+	local fixture_remote="${TEST_DIR}/profile-remote.git"
+	local helper_dir="${TEST_DIR}/helper"
+	local helper_path="${helper_dir}/profile-readme-helper.sh"
+
+	mkdir -p "${helper_dir}" "${fixture_home}/.config/maestro"
+	mkdir -p "${fixture_home}/.maestro/.agent-workspace/observability"
+	mkdir -p "${fixture_home}/.maestro/cache"
+	install_helper_with_libs "${helper_dir}"
+	write_stub_dependencies "${helper_dir}"
+
+	# Create a bare remote and local clone with the default GitHub template
+	git init --bare --initial-branch=main "${fixture_remote}" >/dev/null
+	git init -b main "${fixture_repo}" >/dev/null
+	git -C "${fixture_repo}" config user.name "Fixture"
+	git -C "${fixture_repo}" config user.email "fixture@example.com"
+	git -C "${fixture_repo}" config commit.gpgsign false
+	git -C "${fixture_repo}" remote add origin "${fixture_remote}"
+
+	# Write the exact default GitHub profile template
+	cat >"${fixture_repo}/README.md" <<'EOF'
+## Hi there 👋
+
+<!--
+**fixture/fixture** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
+
+Here are some ideas to get you started:
+
+- 🔭 I'm currently working on ...
+- 🌱 I'm currently learning ...
+- 👯 I'm looking to collaborate on ...
+- 🤔 I'm looking for help with ...
+- 💬 Ask me about ...
+- 📫 How to reach me: ...
+- 😄 Pronouns: ...
+- ⚡ Fun fact: ...
+-->
+EOF
+
+	git -C "${fixture_repo}" add README.md
+	git -C "${fixture_repo}" commit -m "Initial commit" >/dev/null
+	git -C "${fixture_repo}" push -u origin main >/dev/null
+
+	# Set up repos.json
+	cat >"${fixture_home}/.config/maestro/repos.json" <<EOF
+{
+  "initialized_repos": [
+    {
+      "path": "${fixture_repo}",
+      "slug": "fixture/fixture",
+      "priority": "profile",
+      "pulse": false,
+      "maintainer": "fixture"
+    }
+  ]
+}
+EOF
+
+	# Run update — should detect default template and replace with rich README
+	if ! HOME="${fixture_home}" bash "${helper_path}" update >/dev/null 2>&1; then
+		print_result "${test_name}" 1 "helper update command failed"
+		return 0
+	fi
+
+	local readme="${fixture_repo}/README.md"
+
+	# Verify the default template is gone
+	if grep -q 'is a.*special.*repository' "$readme" 2>/dev/null; then
+		print_result "${test_name}" 1 "default GitHub template still present after update"
+		return 0
+	fi
+
+	# Verify markers were added
+	if ! grep -q '<!-- STATS-START -->' "$readme"; then
+		print_result "${test_name}" 1 "STATS-START marker not found after update"
+		return 0
+	fi
+
+	# Verify it's a rich README (has the maestro tagline)
+	if ! grep -q 'maestro' "$readme"; then
+		print_result "${test_name}" 1 "maestro reference not found — not a rich README"
+		return 0
+	fi
+
+	print_result "${test_name}" 0
+	return 0
+}
+
+test_default_template_with_existing_markers_replaced() {
+	local test_name="default template with existing markers gets replaced"
+
+	TEST_DIR=$(mktemp -d)
+	local fixture_home="${TEST_DIR}/home"
+	local fixture_repo="${TEST_DIR}/profile-repo"
+	local fixture_remote="${TEST_DIR}/profile-remote.git"
+	local helper_dir="${TEST_DIR}/helper"
+	local helper_path="${helper_dir}/profile-readme-helper.sh"
+
+	mkdir -p "${helper_dir}" "${fixture_home}/.config/maestro"
+	mkdir -p "${fixture_home}/.maestro/.agent-workspace/observability"
+	mkdir -p "${fixture_home}/.maestro/cache"
+	install_helper_with_libs "${helper_dir}"
+	write_stub_dependencies "${helper_dir}"
+
+	git init --bare --initial-branch=main "${fixture_remote}" >/dev/null
+	git init -b main "${fixture_repo}" >/dev/null
+	git -C "${fixture_repo}" config user.name "Fixture"
+	git -C "${fixture_repo}" config user.email "fixture@example.com"
+	git -C "${fixture_repo}" config commit.gpgsign false
+	git -C "${fixture_repo}" remote add origin "${fixture_remote}"
+
+	# Simulate Alex's exact case: default GitHub template with markers already
+	# injected at the bottom (by v3.1.87 _inject_markers_into_readme)
+	cat >"${fixture_repo}/README.md" <<'EOF'
+## Hi there 👋
+
+<!--
+**fixture/fixture** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
+
+Here are some ideas to get you started:
+
+- 🔭 I'm currently working on ...
+- 🌱 I'm currently learning ...
+-->
+
+<!-- STATS-START -->
+Old stats content
+<!-- STATS-END -->
+
+<!-- CONTRIBUTIONS-START -->
+<!-- CONTRIBUTIONS-END -->
+
+---
+
+<!-- UPDATED-START -->
+<!-- UPDATED-END -->
+EOF
+
+	git -C "${fixture_repo}" add README.md
+	git -C "${fixture_repo}" commit -m "feat: markers injected into default template" >/dev/null
+	git -C "${fixture_repo}" push -u origin main >/dev/null
+
+	cat >"${fixture_home}/.config/maestro/repos.json" <<EOF
+{
+  "initialized_repos": [
+    {
+      "path": "${fixture_repo}",
+      "slug": "fixture/fixture",
+      "priority": "profile",
+      "pulse": false,
+      "maintainer": "fixture"
+    }
+  ]
+}
+EOF
+
+	# Run update — should detect default template despite markers and replace it
+	if ! HOME="${fixture_home}" bash "${helper_path}" update >/dev/null 2>&1; then
+		print_result "${test_name}" 1 "helper update command failed"
+		return 0
+	fi
+
+	local readme="${fixture_repo}/README.md"
+
+	# Verify the default template is gone
+	if grep -q 'is a.*special.*repository' "$readme" 2>/dev/null; then
+		print_result "${test_name}" 1 "default GitHub template still present after update"
+		return 0
+	fi
+
+	# Verify the "Hi there" heading is gone (replaced with rich profile heading)
+	if grep -q 'Hi there' "$readme" 2>/dev/null; then
+		print_result "${test_name}" 1 "'Hi there' heading still present — template not replaced"
+		return 0
+	fi
+
+	# Verify markers still exist
+	if ! grep -q '<!-- STATS-START -->' "$readme"; then
+		print_result "${test_name}" 1 "STATS-START marker missing after replacement"
+		return 0
+	fi
+
+	# Verify it's a rich README
+	if ! grep -q 'maestro' "$readme"; then
+		print_result "${test_name}" 1 "maestro reference not found — not a rich README"
+		return 0
+	fi
+
+	print_result "${test_name}" 0
+	return 0
+}
+
+test_session_time_vars_default_missing_null_values() {
+	local test_name="session time vars default missing and null values"
+
+	TEST_DIR=$(mktemp -d)
+	local stdout_file="${TEST_DIR}/stdout"
+	local stderr_file="${TEST_DIR}/stderr"
+
+	# shellcheck source=../profile-readme-data-lib.sh
+	source "${SOURCE_DATA_LIB}"
+	# shellcheck source=../profile-readme-render-lib.sh
+	source "${SOURCE_RENDER_LIB}"
+
+	local valid_json null_json empty_json assignments
+	valid_json='{"interactive_human_hours":1.2,"interactive_machine_hours":0.3,"worker_human_hours":2,"worker_machine_hours":3,"total_human_hours":4,"total_machine_hours":5,"interactive_sessions":6,"worker_sessions":7}'
+	null_json='{"interactive_human_hours":null,"interactive_machine_hours":null,"worker_human_hours":null,"worker_machine_hours":null,"total_human_hours":null,"total_machine_hours":null,"interactive_sessions":null,"worker_sessions":null}'
+	empty_json='{}'
+
+	if ! _generate_session_time_vars "${empty_json}" "${null_json}" "${valid_json}" "${valid_json}" >"${stdout_file}" 2>"${stderr_file}"; then
+		print_result "${test_name}" 1 "session time var generation failed"
+		return 0
+	fi
+
+	assignments=$(<"${stdout_file}")
+	if grep -q 'printf: null' "${stderr_file}"; then
+		print_result "${test_name}" 1 "printf emitted null numeric warning"
+		return 0
+	fi
+	if grep -q 'null' "${stdout_file}"; then
+		print_result "${test_name}" 1 "rendered shell assignments contain raw null"
+		return 0
+	fi
+
+	local day_human day_worker day_total day_interactive day_workers
+	local week_human week_worker week_total week_interactive week_workers
+	local month_human month_worker month_total month_interactive month_workers
+	local year_human year_worker year_total year_interactive year_workers
+	eval "${assignments}"
+	if [[ "${day_human}" != "0.0" || "${day_worker}" != "0.0" || "${day_total}" != "0.0" ]]; then
+		print_result "${test_name}" 1 "missing day hour fields did not default to 0.0"
+		return 0
+	fi
+	if [[ "${day_interactive}" != "0" || "${day_workers}" != "0" || "${week_interactive}" != "0" || "${week_workers}" != "0" ]]; then
+		print_result "${test_name}" 1 "missing/null count fields did not default to 0"
+		return 0
+	fi
+	if [[ "${month_human}" != "1.2" || "${month_worker}" != "5.0" || "${month_total}" != "9.0" || "${month_interactive}" != "6" || "${month_workers}" != "7" ]]; then
+		print_result "${test_name}" 1 "valid session data rendering changed"
+		return 0
+	fi
+	if [[ "${year_human}" != "1.2" ]]; then
+		print_result "${test_name}" 1 "user AI session hours were not limited to attended interactive time"
+		return 0
+	fi
+
+	print_result "${test_name}" 0
+	return 0
+}
+
+test_work_with_ai_worker_counts_above_thousand() {
+	local test_name="work with AI worker counts above one thousand render"
+
+	TEST_DIR=$(mktemp -d)
+	mkdir -p "${TEST_DIR}/home"
+
+	# shellcheck source=../profile-readme-data-lib.sh
+	source "${SOURCE_DATA_LIB}"
+	# shellcheck source=../profile-readme-render-lib.sh
+	source "${SOURCE_RENDER_LIB}"
+
+	local screen_json day_json week_json month_json year_json output_file
+	screen_json='{"today_hours":1,"week_hours":2,"month_hours":3,"year_hours":4}'
+	day_json='{"interactive_human_hours":1,"interactive_machine_hours":0.5,"worker_human_hours":2,"worker_machine_hours":3,"total_human_hours":4,"total_machine_hours":5,"interactive_sessions":22,"worker_sessions":55}'
+	week_json='{"interactive_human_hours":10,"interactive_machine_hours":1.5,"worker_human_hours":20,"worker_machine_hours":30,"total_human_hours":40,"total_machine_hours":50,"interactive_sessions":183,"worker_sessions":1080}'
+	month_json='{"interactive_human_hours":100,"interactive_machine_hours":23.4,"worker_human_hours":200,"worker_machine_hours":300,"total_human_hours":400,"total_machine_hours":500,"interactive_sessions":497,"worker_sessions":1518}'
+	year_json="${month_json}"
+	output_file="${TEST_DIR}/work-with-ai.md"
+
+	if ! HOME="${TEST_DIR}/home" _generate_work_with_ai_table \
+		"${screen_json}" "${day_json}" "${week_json}" "${month_json}" "${year_json}" >"${output_file}"; then
+		print_result "${test_name}" 1 "Work with AI table generation failed"
+		return 0
+	fi
+
+	if ! grep -qF '| Worker sessions | 55 | 1,080 | 1,518 | 1,518 |' "${output_file}"; then
+		print_result "${test_name}" 1 "four-digit worker session counts were not preserved and comma-formatted"
+		return 0
+	fi
+
+	if grep -qF '| Worker sessions | 55 | 0 | 0 | 0 |' "${output_file}"; then
+		print_result "${test_name}" 1 "worker session counts regressed to zero after double-formatting"
+		return 0
+	fi
+
+	if ! grep -qF '| User AI session hours | 1.0h | 10.0h | 100.0h | 100.0h |' "${output_file}"; then
+		print_result "${test_name}" 1 "user AI session hours were not limited to attended interactive time"
+		return 0
+	fi
+
+	if grep -qF '| User AI session hours | 1.5h | 11.5h | 123.4h | 123.4h |' "${output_file}"; then
+		print_result "${test_name}" 1 "user AI session hours still include AI generation time"
+		return 0
+	fi
+
+	print_result "${test_name}" 0
+	return 0
+}
+
+test_all_time_model_usage_prefers_larger_complete_source() {
+	local test_name="all-time model usage prefers larger complete source"
+
+	# Simulate the OpenCode-schema drift case where message JSON all-time data is
+	# stale for one current model even though its older aggregate request count is
+	# larger than observability's complete current population.
+	_get_model_usage_from_obs_db() {
+		local date_filter="${1:-}"
+		if [[ -n "${date_filter}" ]]; then
+			printf '%s\n' '[{"model":"obs-model","requests":20,"input_tokens":200,"output_tokens":20,"cache_read_tokens":2000,"cache_write_tokens":0,"cost_total":2}]'
+			return 0
+		fi
+		printf '%s\n' '[{"model":"obs-model","requests":30,"input_tokens":300,"output_tokens":30,"cache_read_tokens":3000,"cache_write_tokens":0,"cost_total":3}]'
+		return 0
+	}
+
+	_get_model_usage_from_opencode() {
+		printf '%s\n' '[{"model":"obs-model","requests":10,"input_tokens":100,"output_tokens":10,"cache_read_tokens":1000,"cache_write_tokens":0,"cost_total":1},{"model":"old-model","requests":100,"input_tokens":1000,"output_tokens":100,"cache_read_tokens":10000,"cache_write_tokens":0,"cost_total":10}]'
+		return 0
+	}
+
+	local result model
+	result=$(_get_model_usage all)
+	model=$(printf '%s' "${result}" | jq -r '.[0].model')
+
+	if [[ "${model}" != "obs-model" ]]; then
+		print_result "${test_name}" 1 "expected obs-model, got ${model}"
+		return 0
+	fi
+
+	print_result "${test_name}" 0
+	return 0
+}
+
+test_model_usage_undercut_handles_missing_candidate_model() {
+	local test_name="model usage undercut handles missing candidate model"
+	local candidate_json reference_json
+
+	# shellcheck source=../profile-readme-data-lib.sh
+	source "${SOURCE_DATA_LIB}"
+
+	candidate_json='[{"model":"other-model","requests":5,"input_tokens":50,"output_tokens":5,"cache_read_tokens":500}]'
+	reference_json='[{"model":"missing-model","requests":1,"input_tokens":10,"output_tokens":1,"cache_read_tokens":100}]'
+
+	if ! _model_usage_undercuts_reference "${candidate_json}" "${reference_json}"; then
+		print_result "${test_name}" 1 "missing candidate model did not undercut reference"
+		return 0
+	fi
+
+	print_result "${test_name}" 0
+	return 0
+}
+
+test_all_time_token_totals_prefers_largest_population() {
+	local test_name="all-time token totals prefer largest population"
+
+	_token_totals_from_obs_db() {
+		local period="${1:-30d}"
+		[[ "${period}" == "all" ]] || return 1
+		printf '%s\n' '{"total_input":20,"total_output":20,"total_cache_read":20,"total_cache_write":0}'
+		return 0
+	}
+
+	_token_totals_from_opencode_db() {
+		printf '%s\n' '{"total_input":10,"total_output":10,"total_cache_read":10,"total_cache_write":0}'
+		return 0
+	}
+
+	_token_totals_from_jsonl() {
+		local period="${1:-30d}"
+		[[ "${period}" == "all" ]] || return 1
+		printf '%s\n' '{"total_input":5,"total_output":5,"total_cache_read":5,"total_cache_write":0}'
+		return 0
+	}
+
+	local result total_all
+	result=$(_get_token_totals all)
+	total_all=$(printf '%s' "${result}" | jq -r '.total_all')
+
+	if [[ "${total_all}" != "60" ]]; then
+		print_result "${test_name}" 1 "expected total_all=60, got ${total_all}"
+		return 0
+	fi
+
+	print_result "${test_name}" 0
+	return 0
+}
+
+main() {
+	if [[ ! -x "${SOURCE_HELPER}" ]]; then
+		echo "Helper script not found or not executable: ${SOURCE_HELPER}" >&2
+		return 1
+	fi
+
+	test_update_preserves_manual_sections
+	teardown
+	test_inject_markers_into_existing_readme
+	teardown
+	test_diverged_history_recovery
+	teardown
+	test_default_template_replaced_with_rich_readme
+	teardown
+	test_default_template_with_existing_markers_replaced
+	teardown
+	test_session_time_vars_default_missing_null_values
+	teardown
+	test_work_with_ai_worker_counts_above_thousand
+	teardown
+	test_all_time_model_usage_prefers_larger_complete_source
+	teardown
+	test_model_usage_undercut_handles_missing_candidate_model
+	teardown
+	test_all_time_token_totals_prefers_largest_population
+	teardown
+
+	echo ""
+	echo "Tests run: ${TESTS_RUN}"
+	echo "Passed:    ${TESTS_PASSED}"
+	echo "Failed:    ${TESTS_FAILED}"
+
+	if [[ "${TESTS_FAILED}" -gt 0 ]]; then
+		return 1
+	fi
+
+	return 0
+}
+
+main "$@"

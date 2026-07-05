@@ -1,0 +1,1 @@
+../../content/youtube-script.md

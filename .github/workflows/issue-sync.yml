@@ -1,0 +1,43 @@
+name: Issue Sync - Bi-directional TODO.md ↔ GitHub Issues
+
+# Thin caller for the reusable workflow at .github/workflows/issue-sync-reusable.yml.
+# maestro eats its own dogfood — it calls the same reusable workflow that
+# downstream repos call via `uses: Aditya060806/Maestro/.github/workflows/issue-sync-reusable.yml@main`.
+# The only difference is the relative-path `uses:` here vs the absolute path there.
+#
+# Downstream caller template: .agents/templates/workflows/issue-sync-caller.yml
+# Architecture: .agents/reference/reusable-workflows.md
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'TODO.md'
+      - 'todo/PLANS.md'
+      - 'todo/tasks/**'
+  pull_request_target:
+    branches: [main]
+    types: [closed, opened, edited]
+  issues:
+    types: [opened, closed]
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'Sync command to run'
+        required: true
+        default: 'status'
+        type: choice
+        options:
+          - status
+          - pull
+          - push
+          - close
+          - reconcile
+          - enrich
+
+jobs:
+  sync:
+    uses: ./.github/workflows/issue-sync-reusable.yml
+    secrets: inherit
+    with:
+      command: ${{ inputs.command || '' }}

@@ -1,0 +1,69 @@
+<!-- SPDX-License-Identifier: MIT -->
+<!-- SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest -->
+
+# Self-Improvement
+
+Every session must improve the system. Fix the process, not the symptom.
+
+## Core Workflow
+
+**State observation.** `TODO.md`, `todo/PLANS.md`, and GitHub issues/PRs are canonical state. Never duplicate into separate files/logs.
+
+**Signals** (check via `gh` CLI): PR open 6h+ with no progress; PR closed without merge (worker failure); repeated CI failures or duplicate PRs.
+
+**Response: file an issue.** Describe pattern, root cause, and proposed fix. Never patch around broken processes.
+
+## Routing & Filing
+
+**Framework-level** (`~/.maestro/`, scripts, prompts, orchestration) → `Aditya060806/Maestro`. **Project-specific** (CI, code, deps) → current repo. Test: "Does this apply to all repos?" Never file framework tasks in project repos.
+
+### Filing framework issues (GH#5149)
+
+Use `framework-issue-helper.sh`, not `claim-task-id.sh`:
+
+```bash
+# Detect framework vs project (exit 0=framework, 1=project)
+~/.maestro/agents/scripts/framework-issue-helper.sh detect "description"
+
+# File on Aditya060806/Maestro (auto-deduplicates)
+~/.maestro/agents/scripts/framework-issue-helper.sh log \
+  --title "Bug: supervisor pipeline fails..." --body "Observed in..." --label "bug"
+```
+
+## Constraints & Quality
+
+**Scope boundary (t1405, GH#2928):** `PULSE_SCOPE_REPOS` limits worktrees/PRs. Filing issues is always allowed. Outside scope → file issue and stop.
+
+**Issue quality filter (GH#6508):** Enhancements require (1) observed failure (no preemptive bloat), (2) no deterministic alternative, (3) not a deliberate framework choice. Bar: **observed failure first, minimal guidance**.
+
+**Intelligence over determinism:** See `.agents/AGENTS.md` "Framework Rules > Intelligence Over Determinism". Use deterministic rules for CLI/paths/security; judgment for everything else. Use cheapest capable model.
+
+## What to Improve
+
+- Repeated failure patterns, prompt misunderstandings, or missing automation.
+- Stale blocked tasks or **information gaps (t1416)** (missing tier/branch/diagnosis).
+- Run session miner pulse (`scripts/session-miner-pulse.sh`).
+
+## Session Learning Capture
+
+Treat valuable session learning as system input, not disposable transcript context. Outliers are expensive to find intentionally; when one appears during normal work, convert it into reusable system knowledge before it evaporates.
+
+- **Apply now** when the lesson directly improves the user's requested aim without widening risk.
+- **Brief for workers** when the lesson exposes a fixable bug, missing validator, missing doc, recurring failure mode, or automation gap. Use worker-ready context: files, pattern, evidence, verification, and an explicit note when paths are unknown.
+- **Store memory/reference** when the lesson is reusable but not immediately dispatchable, especially diagnostics, edge cases, duplicate patterns, and "similar but different" hazards.
+- **Route design learning by scope:** durable repo-specific UI patterns belong in that repo's `DESIGN.md`; generic maestro briefing/verification patterns become maestro issues with anonymised evidence; uncertain or broad design lessons become worker-ready follow-ups instead of bloating global docs.
+- **Avoid speculative bloat:** capture observed examples and evidence; do not add global guidance for hypothetical failures.
+
+### Similar-but-different hazards
+
+- When two patterns look related but differ in contract, scope, or trust boundary, do not merge them mentally or create a third near-duplicate pattern.
+- Standardize when evidence supports one canonical path; otherwise record the distinction and route cleanup as a task.
+- Good captures name the files/functions, the conflicting conventions, why one path is safer or preferred, and how to verify the chosen convention.
+
+### Auditable failures
+
+Failure information is valuable when it helps future sessions diagnose and avoid wasted work. Capture failures with: symptom, command/check evidence, affected file/PR/issue, suspected versus verified cause, next action, and whether the lesson belongs in a hook, validator, worker task, memory, or reference doc. Do not publish blame until diagnostics evidence supports it; see `reference/diagnostics-discipline.md`.
+
+## Autonomous Operation
+
+"continue"/"monitor"/"keep going" → autonomous mode: sleep/wait loops, perpetual todo for compaction survival. Interrupt only for blocking errors requiring user input.

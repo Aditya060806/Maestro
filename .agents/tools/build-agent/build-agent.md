@@ -1,0 +1,202 @@
+---
+name: build-agent
+description: Agent design and composition - creating efficient, token-optimized AI agents
+mode: subagent
+---
+
+<!-- SPDX-License-Identifier: MIT -->
+<!-- SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest -->
+
+# Build-Agent - Composing Efficient AI Agents
+
+<!-- AI-CONTEXT-START -->
+
+## Quick Reference
+
+- **Budget**: ~50-100 instructions per agent; root AGENTS.md universally applicable only
+- **Subdivision**: Docs >~300 lines → split into entry point + sub-docs; don't cut to hit a line count
+- **MCP servers**: Disabled globally, enabled per-agent
+- **Code refs**: `rg "pattern"` search patterns, not `file:line` (line numbers drift)
+- **Subagents**: `agent-review.md` (review), `agent-testing.md` (testing)
+- **Slash command**: `/build-agent {name} {kind} [category]` → `.agents/scripts/commands/build-agent.md` (interactive harness for creating new agents)
+- **Related**: `@code-standards`, `.agents/maestro/architecture.md`, `tools/browser/browser-automation.md`
+- **After creating/promoting**: `~/.maestro/agents/scripts/subagent-index-helper.sh generate`
+- **Testing**: `agent-test-helper.sh run my-tests` or `claude -p "Test query"`
+- **Model tier**: `/route "task"` or `/patterns recommend "type"`. Static: `haiku`→formatting, `sonnet`→code, `opus`→architecture. Pattern data overrides at >75% success, 3+ samples.
+
+<!-- AI-CONTEXT-END -->
+
+## Main Agent vs Subagent
+
+| Aspect | Main Agent | Subagent |
+|--------|-----------|----------|
+| **Scope** | Broad domain | Specific tool/service/task |
+| **Role** | Coordinates, strategic | Focused independent execution |
+| **Location** | Root of `.agents/` | `tools/`, `services/`, `workflows/` |
+| **MCP tools** | NEVER enable directly | Enable per-agent |
+
+## Subagent YAML Frontmatter (Required — omitting defaults to read-only)
+
+```yaml
+---
+description: Brief description of agent purpose
+mode: subagent
+tools:
+  read: true      # Low risk
+  write: false    # Medium risk - adds files
+  edit: false     # Medium risk - changes files
+  bash: false     # High risk - arbitrary execution
+  glob: true      # Low risk
+  grep: true      # Low risk
+  webfetch: false # Low risk
+  task: true      # Medium risk - delegates work
+---
+```
+
+- **MCP tool patterns** (subagents only): `context7_*: true`, `wordpress-mcp_*: true`. Injected by plugin at startup — do not set in `opencode.json` directly.
+- **MCP tool filtering** (future `includeTools` — 17k→1.5k token savings): `mcp_requirements: { chrome-devtools: { tools: [navigate_page, take_screenshot] } }`
+- **Main-branch write restrictions**: ALLOWED: `README.md`, `TODO.md`, `todo/PLANS.md`, `todo/tasks/*`. BLOCKED: all other files.
+- **Adding a new MCP** (two files required — plugin is authoritative, not `opencode.json`):
+  1. `mcp-registry.mjs` `getMcpRegistry()`: `{ name, command/url, eager: false, toolPattern: "foo_*", globallyEnabled: false }`
+  2. `agent-loader.mjs` `AGENT_MCP_TOOLS`: `"my-agent": ["foo_*"]`
+  Then add `foo_*: true` to the agent's frontmatter `tools:` block for documentation.
+- **Source of truth**: `.agents/` → deployed to `~/.maestro/agents/` by `setup.sh`. Stubs: `~/.config/opencode/agent/` via `generate-opencode-agents.sh`.
+- **Deployment sync**: changes in `.agents/` require `./setup.sh`. Offer to run on create/rename/move/merge/delete.
+
+## Folder Organization
+
+```text
+.agents/
+├── AGENTS.md           # Entry point (ALLCAPS)
+├── {agent}.md          # Main agents at root (lowercase, strategy/what)
+├── {agent}/            # Extended knowledge for that agent (flat files)
+├── tools/              # Cross-domain capabilities (how to do it)
+├── services/           # External integrations (how to connect)
+├── workflows/          # Process guides (how to process)
+├── reference/          # Operating rules (how to operate)
+├── scripts/            # Shared helper scripts (flat, cross-domain)
+├── scripts/commands/   # Slash command definitions
+├── configs/            # Configuration templates and schemas
+├── bundles/            # Project-type presets
+├── templates/          # Reusable templates
+├── rules/              # Enforced constraints
+├── tests/              # Agent test suites
+├── custom/             # User's private agents (survives updates)
+└── draft/              # R&D experimental (survives updates)
+```
+
+**Placement test:** "Would another agent use this independently?" Yes → `tools/`/`services/`/`workflows/`/`reference/`. No → `{agent}/`.
+
+### The `{name}.md` + `{name}/` Convention
+
+- **Single-file**: `{name}.md` — no directory needed
+- **Multi-file**: `{name}.md` (entry point, always loaded) + `{name}/` (extended knowledge, on demand)
+- Prefer flat files with prefix-based naming (`marketing-sales/meta-ads*.md`). Max depth: 2 levels. Subdirectory only when a prefix group exceeds ~20 files.
+
+### Scripts: Flat by Design
+
+Scripts flat in `scripts/` — cross-domain, any agent can call any script. Prefix naming (`email-*`, `seo-*`) for grouping. `*-helper.sh` = agent-callable; other `.sh` = framework infra. `scripts/commands/` = slash commands.
+
+### Ingested Skills
+
+External skills retain `-skill` suffix (provenance marker for `skill-update-helper.sh`). Structure flattened on ingestion: `SKILL.md` → `{name}-skill.md`; `{name}-skill/references/*.md` → `{name}-skill/{topic}.md`; nested `CHEATSHEET/*.md` → `{name}-skill/cheatsheet-{topic}.md`. See `add-skill.md`.
+
+### Naming Conventions
+
+- **Files**: lowercase-hyphens (`kebab-case`). ALLCAPS for entry points only. Python: `snake_case`.
+- **Scripts**: `[domain]-[function]-helper.sh` (agent-callable), `[name].sh` (framework infra).
+- **Subagent discovery**: `find -mindepth 2` skips root-level main agents.
+- **File structure** — main agents: `# Name` → AI-CONTEXT Quick Reference → docs. Subagents: YAML frontmatter + content.
+- **Slash commands**: NEVER define inline in main agents. Generic → `scripts/commands/{command}.md`. Domain-specific → `{domain}/{subagent}.md`.
+
+## Model Tier Selection
+
+Record outcomes: `/remember "SUCCESS/FAILURE: agent with model — reason"`. Frontmatter: `model: sonnet  # 87% success, 14 samples`. Full docs: `tools/context/model-routing.md`, `reference/task-taxonomy.md`.
+
+| Tier | Model | Agent use |
+|------|-------|-----------|
+| `tier:simple` | Haiku | Execution of prescriptive briefs with exact code blocks. 100% success when oldString/newString provided verbatim. |
+| `tier:standard` | Sonnet | Standard implementation, judgment, error recovery, multi-file coordination. Default for code tasks. |
+| `tier:thinking` | Opus | Architecture decisions, novel design, security audits, analysis that creates work for lower tiers. |
+
+| Situation | Action |
+|-----------|--------|
+| >75% success, 3+ samples | Use pattern data (overrides static rule) |
+| Insufficient data | Use routing rules, record outcomes |
+| Contradicts routing rules | Note conflict in agent docs |
+
+### Designing tier-aware output
+
+Agents that *create work* (issues, briefs, review findings) should format output so the implementing worker can be dispatched at `tier:simple`:
+
+- **Provide verbatim code**: `Current` / `Proposed` blocks should be exact oldString/newString, not paraphrased descriptions. Research: Haiku achieves 100% success with exact code, 0% with "change X to Y" descriptions.
+- **Include file paths with line ranges**: `path/to/file.ts:45-60`, not "the auth module".
+- **One finding = one edit**: Don't bundle multiple changes into a single narrative finding. Each discrete edit should be a separate, mechanically executable step.
+- **Add verification**: A bash one-liner the worker runs after applying the edit.
+
+This applies to: code-simplifier findings, quality-feedback issues, review-feedback issues, and any agent that creates `auto-dispatch` work items.
+
+## Quality Checking
+
+Linter order: (1) deterministic (ShellCheck, ESLint, Ruff/Pylint), (2) static analysis (SonarCloud, Secretlint), (3) LLM review (CodeRabbit — architectural only). Prefer `bun`/`bunx` over `npm`/`npx`. Never send an LLM to do a linter's job. Prefer official docs, RFCs, source code, first-party data over outdated tutorials or vendor claims.
+
+## Agent Design Checklist
+
+1. **YAML frontmatter?** All subagents require it
+2. **Universally applicable?** >80% of tasks? If not → more specific subagent
+3. **Pointer instead?** Use `rg "pattern"` or Context7 MCP if content exists elsewhere
+4. **Code example?** Authoritative? Will it drift? Security: placeholders only
+5. **Instruction count?** Combine related, remove redundant
+6. **Duplicates?** `rg "pattern" .agents/` before adding
+7. **Existing agent?** Call and improve vs duplicate — never create a copy
+8. **Sources verified?** Primary, cross-referenced
+9. **Markdown linting?** MD025/MD022/MD031/MD012. Run `bunx markdownlint-cli2 "path/to/file.md"`
+10. **Terse pass done?** See below
+
+## Post-Creation Terse Pass (MANDATORY)
+
+Every token costs on every load. Compress before committing.
+
+**Compress:** verbose phrasing → direct rule; narrative → keep task ID, drop story; redundant examples → keep one; multi-sentence rule → single sentence. **Preserve:** task IDs (`tNNN`), issue refs (`GH#NNN`), all rules/constraints, file paths, command examples, code blocks, safety-critical detail.
+
+Target: reference cards, not tutorials. Evidence: 63% byte reduction on `build.txt` with zero rule loss. See `tools/code-review/code-simplifier.md` "Prose tightening".
+
+## Code Examples: When to Include
+
+**Include:** authoritative with no implementation elsewhere; security-critical template; command syntax IS the doc. **Avoid:** exists in codebase (use search pattern); external library (Context7 MCP); will drift (point to source).
+
+## Self-Assessment Protocol
+
+**Triggers**: Observable failure, user correction, contradiction with Context7/codebase, staleness. **Process**: (1) Complete current task. (2) Identify root cause. (3) `rg "pattern" .agents/` — list ALL files needing coordinated updates. (4) Propose fix with evidence, ask user to confirm before applying.
+
+## Tool Selection
+
+| Task | Preferred | Avoid |
+|------|-----------|-------|
+| Find files | `git ls-files` / `fd` | `mcp_glob` |
+| Search contents | `rg` | `mcp_grep` |
+| Read/Edit files | `mcp_read` / `mcp_edit` | `cat`/`sed` via bash |
+| Web content | `mcp_webfetch` | `curl` via bash |
+| Remote repo | `mcp_webfetch` README first | `npx repomix --remote` |
+| Parallel AI dispatch | OpenCode server API | Multiple TUI instances |
+
+Self-checks: "Faster CLI alternative?" and "Could this return >50K tokens?" See `tools/context/context-guardrails.md`.
+
+## Agent Lifecycle Tiers
+
+| Tier | Location | Survives `setup.sh` | Git Tracked | Purpose |
+|------|----------|---------------------|-------------|---------|
+| **Draft** | `~/.maestro/agents/draft/` | Yes | No | R&D, experimental |
+| **Custom** | `~/.maestro/agents/custom/` | Yes | No | User's private agents |
+| **Sourced** | `~/.maestro/agents/custom/<source>/` | Yes | In private repo | Synced from private Git repos |
+| **Shared** | `.agents/` in repo | Yes (deployed) | Yes | Open-source, submitted via PR |
+
+Ask user which tier. Draft: `status: draft` + `created` date, promote via PR or discard. Custom: never shared/overwritten. Shared: safe linked worktree + PR, no proprietary info. Orchestration agents: draft reusable patterns, log TODO, reference in Task calls.
+
+## Cache-Aware Prompt Patterns
+
+Stable prefix (variable content at end), critical rules first (primacy effect), AI-CONTEXT blocks for essential stable content, minimize MCP tool churn between sessions.
+
+## Reviewing Existing Agents
+
+See `agent-review.md` for systematic review (instruction budgets, universal applicability, duplicates, code examples, AI-CONTEXT blocks, stale content, MCP configuration).

@@ -1,0 +1,124 @@
+# shellcheck shell=bash
+# =============================================================================
+# maestro Feature Toggles — Legacy Default Configuration
+# =============================================================================
+#
+# DEPRECATED: This file is kept for backward compatibility only.
+# The primary config system is now JSONC:
+#   Defaults: ~/.maestro/agents/configs/maestro.defaults.jsonc
+#   User:     ~/.config/maestro/config.jsonc
+#
+# Run 'maestro config migrate' to convert your overrides to JSONC.
+# Run 'maestro config list' to see all available options.
+#
+# This file is only used as a fallback when jq is not installed.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Auto-Update
+# -----------------------------------------------------------------------------
+# Automatically check for and install maestro updates (every 10 min).
+# Set to false to disable all automatic updates. You can still update
+# manually with: maestro update
+# Env override: MAESTRO_AUTO_UPDATE
+auto_update=true
+
+# Minutes between update checks (default: 10).
+# Env override: MAESTRO_UPDATE_INTERVAL
+update_interval=10
+
+# -----------------------------------------------------------------------------
+# Skill Auto-Update
+# -----------------------------------------------------------------------------
+# Automatically check imported skills for upstream changes (daily).
+# Env override: MAESTRO_SKILL_AUTO_UPDATE
+skill_auto_update=true
+
+# Hours between skill freshness checks (default: 24).
+# Env override: MAESTRO_SKILL_FRESHNESS_HOURS
+skill_freshness_hours=24
+
+# -----------------------------------------------------------------------------
+# Tool Auto-Update
+# -----------------------------------------------------------------------------
+# Automatically update installed tools (npm, brew, pip) when user is idle.
+# Env override: MAESTRO_TOOL_AUTO_UPDATE
+tool_auto_update=true
+
+# Hours between tool freshness checks (default: 6).
+# Env override: MAESTRO_TOOL_FRESHNESS_HOURS
+tool_freshness_hours=6
+
+# Required user idle hours before tool updates run (default: 6).
+# Env override: MAESTRO_TOOL_IDLE_HOURS
+tool_idle_hours=6
+
+# -----------------------------------------------------------------------------
+# OpenCode Configuration Management
+# -----------------------------------------------------------------------------
+# Allow setup.sh to modify opencode.json (agents, MCPs, settings).
+# Set to false if you manage opencode.json manually and don't want
+# maestro to overwrite your changes.
+manage_opencode_config=true
+
+# -----------------------------------------------------------------------------
+# Claude Code Configuration Management
+# -----------------------------------------------------------------------------
+# Allow setup.sh to modify Claude Code config (commands, MCPs, settings).
+# Set to false if you manage Claude Code config manually.
+manage_claude_config=true
+
+# -----------------------------------------------------------------------------
+# Supervisor Pulse
+# -----------------------------------------------------------------------------
+# Enable the autonomous supervisor pulse scheduler (dispatches workers,
+# merges PRs, evaluates results). Requires explicit user consent during
+# setup — defaults to OFF. Set to true to enable autonomous orchestration.
+# Env override: MAESTRO_SUPERVISOR_PULSE
+supervisor_pulse=false
+
+# -----------------------------------------------------------------------------
+# Repo Sync
+# -----------------------------------------------------------------------------
+# Enable daily git pull --ff-only on clean repos.
+# Env override: MAESTRO_REPO_SYNC
+repo_sync=true
+
+# -----------------------------------------------------------------------------
+# Session Greeting
+# -----------------------------------------------------------------------------
+# Show version check and update prompt when starting an AI session.
+# Set to false for a quieter startup experience.
+session_greeting=true
+
+# -----------------------------------------------------------------------------
+# Safety Hooks
+# -----------------------------------------------------------------------------
+# Install git pre-commit and pre-push safety hooks that block
+# destructive commands. Set to false if hooks conflict with your workflow.
+safety_hooks=true
+
+# -----------------------------------------------------------------------------
+# Shell Aliases
+# -----------------------------------------------------------------------------
+# Add maestro shell aliases to .zshrc/.bashrc during setup.
+# Set to false if you prefer to manage your shell config manually.
+shell_aliases=true
+
+# -----------------------------------------------------------------------------
+# Onboarding Prompt
+# -----------------------------------------------------------------------------
+# Offer to launch /onboarding after setup.sh completes.
+# Set to false to skip the prompt.
+onboarding_prompt=true
+
+# -----------------------------------------------------------------------------
+# OpenClaw Auto-Update
+# -----------------------------------------------------------------------------
+# Automatically check for OpenClaw updates (daily, if installed).
+# Env override: MAESTRO_OPENCLAW_AUTO_UPDATE
+openclaw_auto_update=true
+
+# Hours between OpenClaw update checks (default: 24).
+# Env override: MAESTRO_OPENCLAW_FRESHNESS_HOURS
+openclaw_freshness_hours=24

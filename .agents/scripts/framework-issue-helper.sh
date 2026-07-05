@@ -1,0 +1,726 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025-2026 Aditya Pandey and Harvest
+# framework-issue-helper.sh - Route self-improvement issues to the maestro repo
+# Part of maestro framework: https://maestro.sh
+#
+# Fixes GH#5149: workers creating framework tasks in project repos despite prose guidance.
+# This script provides a first-class action for workers to route framework-level issues
+# to the correct repo (Aditya060806/Maestro) instead of the current project repo.
+#
+# Usage:
+#   framework-issue-helper.sh detect "title or description text"
+#   framework-issue-helper.sh log --title "Title" --body "Body" [--label "bug"]
+#   framework-issue-helper.sh check-repo [--repo-path PATH]
+#
+# Commands:
+#   detect TEXT        Detect if text contains framework-level indicators.
+#                      Exit 0 = framework issue, exit 1 = project issue.
+#                      Prints "framework" or "project" to stdout.
+#
+#   log                Create an issue on the maestro repo (Aditya060806/Maestro).
+#                      Gathers diagnostics automatically. Deduplicates by title.
+#                      Options:
+#                        --title TEXT      Issue title (required)
+#                        --body TEXT       Issue body (optional, auto-generated if omitted)
+#                        --label LABEL     GitHub label (default: "bug")
+#                        --auto-dispatch   Add worker-ready auto-dispatch labels
+#                        --tier TIER       Add tier label for auto-dispatch (for example: standard)
+#                        --dry-run         Print what would be created, don't create
+#
+#   check-repo         Check if the current repo is the maestro framework repo.
+#                      Exit 0 = is maestro repo, exit 1 = is a project repo.
+#                      Options:
+#                        --repo-path PATH  Path to check (default: current directory)
+#
+# Framework-level indicators (any match → framework issue):
+#   - File paths under ~/.maestro/
+#   - Framework script names: ai-lifecycle.sh, dispatch.sh, pulse-wrapper.sh,
+#     pre-edit-check.sh, claim-task-id.sh, headless-runtime-helper.sh, etc.
+#   - Framework concepts: supervisor, pulse, worker dispatch, model routing,
+#     cross-repo orchestration, agent prompt behaviour
+#   - Explicit markers: [framework], [maestro], framework-level
+#
+# Exit codes:
+#   0 - Success
+#   1 - Error or "not framework" (for detect command)
+#   2 - Dry run (no changes made)
+#
+# Examples:
+#   # Detect if a task is framework-level
+#   if framework-issue-helper.sh detect "Bug in ai-lifecycle.sh phase 3 pipeline"; then
+#     echo "Route to maestro repo"
+#   fi
+#
+#   # Log a framework issue (workers use this instead of claim-task-id.sh)
+#   framework-issue-helper.sh log \
+#     --title "Phase 3 pipeline stdin consumption bug in ai-lifecycle.sh" \
+#     --body "Observed: workers fail when stdin is consumed in phase 3..."
+#
+#   # Check if we're in the maestro repo
+#   if framework-issue-helper.sh check-repo; then
+#     echo "In maestro repo — use claim-task-id.sh normally"
+#   else
+#     echo "In project repo — use framework-issue-helper.sh log for framework issues"
+#   fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
+LOG_PREFIX="FRAMEWORK"
+# shellcheck source=shared-constants.sh
+source "${SCRIPT_DIR}/shared-constants.sh"
+
+set -euo pipefail
+
+# The canonical maestro repo slug — never guess this
+readonly MAESTRO_SLUG="Aditya060806/Maestro"
+
+# Framework-level path indicators (files/dirs that live in ~/.maestro/)
+readonly FRAMEWORK_PATH_PATTERNS=(
+	"\\.maestro/"
+	"maestro/agents/"
+	"maestro/logs/"
+	"maestro/cache/"
+)
+
+# Framework script names that indicate a framework-level issue
+readonly FRAMEWORK_SCRIPT_NAMES=(
+	"ai-lifecycle.sh"
+	"ai-actions.sh"
+	"dispatch.sh"
+	"pulse-wrapper.sh"
+	"pulse\.sh"
+	"pre-edit-check.sh"
+	"claim-task-id.sh"
+	"headless-runtime-helper.sh"
+	"worker-lifecycle-common.sh"
+	"circuit-breaker-helper.sh"
+	"dispatch-dedup-helper.sh"
+	"model-availability-helper.sh"
+	"task-decompose-helper.sh"
+	"review-bot-gate-helper.sh"
+	"issue-sync-helper.sh"
+	"framework-issue-helper.sh"
+	"session-miner-pulse.sh"
+	"memory-audit-pulse.sh"
+	"auto-update-helper.sh"
+	"maestro-update-check.sh"
+	"bundle-helper.sh"
+	"batch-strategy-helper.sh"
+)
+
+# Framework concept keywords that indicate a framework-level issue
+readonly FRAMEWORK_CONCEPT_KEYWORDS=(
+	"supervisor pulse"
+	"pulse supervisor"
+	"worker dispatch"
+	"model routing"
+	"cross-repo orchestration"
+	"agent prompt"
+	"headless dispatch"
+	"pulse session"
+	"worker slot"
+	"worker lifecycle"
+	"provider rotation"
+	"provider backoff"
+	"session miner"
+	"task counter"
+	"\.task-counter"
+	"claim-task-id"
+	"PULSE_SCOPE_REPOS"
+	"PULSE_STALE_THRESHOLD"
+	"circuit.breaker"
+	"dispatch.dedup"
+	"struggle.ratio"
+	"model.escalation"
+	"framework.level"
+	"\[framework\]"
+	"\[maestro\]"
+	"supervisor evaluate"
+	"supervisor dispatch"
+	"model tier.*supervisor"
+	"supervisor.*model tier"
+	"pulse.*evaluate"
+	"evaluate.*dispatch"
+	"worker.*evaluate"
+	"maestro framework"
+	"maestro repo"
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# detect_framework_issue TEXT
+#
+# Returns 0 (exit) and prints "framework" if TEXT contains framework indicators.
+# Returns 1 (exit) and prints "project" otherwise.
+# ─────────────────────────────────────────────────────────────────────────────
+detect_framework_issue() {
+	local text="$1"
+	local lower_text
+	lower_text=$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')
+
+	# Check path patterns
+	local pattern
+	for pattern in "${FRAMEWORK_PATH_PATTERNS[@]}"; do
+		if printf '%s' "$lower_text" | grep -qE "$pattern" 2>/dev/null; then
+			log_info "Framework indicator (path): $pattern"
+			echo "framework"
+			return 0
+		fi
+	done
+
+	# Check script names
+	for pattern in "${FRAMEWORK_SCRIPT_NAMES[@]}"; do
+		if printf '%s' "$lower_text" | grep -qiE "$pattern" 2>/dev/null; then
+			log_info "Framework indicator (script): $pattern"
+			echo "framework"
+			return 0
+		fi
+	done
+
+	# Check concept keywords
+	for pattern in "${FRAMEWORK_CONCEPT_KEYWORDS[@]}"; do
+		if printf '%s' "$lower_text" | grep -qiE "$pattern" 2>/dev/null; then
+			log_info "Framework indicator (concept): $pattern"
+			echo "framework"
+			return 0
+		fi
+	done
+
+	echo "project"
+	return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# check_is_maestro_repo [REPO_PATH]
+#
+# Returns 0 if REPO_PATH is the maestro framework repo, 1 otherwise.
+# ─────────────────────────────────────────────────────────────────────────────
+check_is_maestro_repo() {
+	local repo_path="${1:-$PWD}"
+
+	# Check remote URL
+	local remote_url
+	remote_url=$(git -C "$repo_path" remote get-url origin 2>/dev/null || echo "")
+
+	if printf '%s' "$remote_url" | grep -qE "Aditya060806/Maestro(\.git)?$"; then
+		return 0
+	fi
+
+	# Check repo name as fallback
+	local repo_name
+	repo_name=$(basename "$(git -C "$repo_path" rev-parse --show-toplevel 2>/dev/null || echo "")")
+	if [[ "$repo_name" == "maestro" ]]; then
+		# Verify it's the right one by checking for framework marker files
+		if [[ -f "${repo_path}/.agents/scripts/framework-issue-helper.sh" ]] ||
+			[[ -f "${repo_path}/VERSION" && -f "${repo_path}/setup.sh" ]]; then
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# get_maestro_repo_path
+#
+# Finds the local path to the maestro repo from repos.json or common locations.
+# Prints the path to stdout, or empty string if not found.
+# ─────────────────────────────────────────────────────────────────────────────
+get_maestro_repo_path() {
+	# Check repos.json first (canonical source)
+	local repos_json="${HOME}/.config/maestro/repos.json"
+	if [[ -f "$repos_json" ]] && command -v jq &>/dev/null; then
+		local path_from_json
+		path_from_json=$(jq -r '.initialized_repos[] | select(.slug == "Aditya060806/Maestro") | .path // empty' \
+			"$repos_json" 2>/dev/null | head -1 || echo "")
+		if [[ -n "$path_from_json" && -d "$path_from_json" ]]; then
+			echo "$path_from_json"
+			return 0
+		fi
+	fi
+
+	# Common locations
+	local candidate
+	for candidate in \
+		"${HOME}/Git/maestro" \
+		"${HOME}/git/maestro" \
+		"${HOME}/Projects/maestro" \
+		"${HOME}/Code/maestro"; do
+		if [[ -d "$candidate" ]] && check_is_maestro_repo "$candidate" 2>/dev/null; then
+			echo "$candidate"
+			return 0
+		fi
+	done
+
+	echo ""
+	return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# gather_diagnostics
+#
+# Collects system info for issue body. Reuses log-issue-helper.sh if available.
+# ─────────────────────────────────────────────────────────────────────────────
+gather_diagnostics() {
+	local log_issue_helper="${SCRIPT_DIR}/log-issue-helper.sh"
+	if [[ -x "$log_issue_helper" ]]; then
+		"$log_issue_helper" diagnostics 2>/dev/null || true
+		return 0
+	fi
+
+	# Minimal fallback diagnostics
+	local version="unknown"
+	if [[ -f "${HOME}/.maestro/agents/VERSION" ]]; then
+		version=$(tr -d '[:space:]' <"${HOME}/.maestro/agents/VERSION" 2>/dev/null || echo "unknown")
+	fi
+
+	cat <<EOF
+- **maestro version**: $version
+- **OS**: $(uname -s) $(uname -r)
+- **Working repo**: $(basename "$(git rev-parse --show-toplevel 2>/dev/null || echo 'none')")
+- **gh CLI**: $(gh --version 2>/dev/null | head -1 || echo "not installed")
+EOF
+	return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _validate_gh_prereqs TITLE
+#
+# Validates that title is non-empty and gh CLI is installed and authenticated.
+# Returns 0 on success, 1 on failure.
+# ─────────────────────────────────────────────────────────────────────────────
+_validate_gh_prereqs() {
+	local title="$1"
+
+	if [[ -z "$title" ]]; then
+		log_error "Title is required"
+		return 1
+	fi
+
+	if ! command -v gh &>/dev/null; then
+		log_error "GitHub CLI (gh) not installed — cannot create issue"
+		log_error "Install with: brew install gh (macOS) or apt install gh (Linux)"
+		return 1
+	fi
+
+	if ! gh auth status &>/dev/null; then
+		log_error "GitHub CLI not authenticated — run: gh auth login"
+		return 1
+	fi
+
+	return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _is_valid_issue_number ISSUE_NUMBER
+#
+# Returns 0 when ISSUE_NUMBER is a positive numeric GitHub issue number.
+# ─────────────────────────────────────────────────────────────────────────────
+_is_valid_issue_number() {
+	local issue_number="$1"
+
+	if [[ "$issue_number" =~ ^[1-9][0-9]*$ ]]; then
+		return 0
+	fi
+
+	return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _find_duplicate_issue TITLE
+#
+# Searches for an existing issue with a similar title on the maestro repo.
+# Prints the issue number to stdout if found, empty string otherwise.
+# Returns 0 if a duplicate was found, 1 otherwise.
+# ─────────────────────────────────────────────────────────────────────────────
+_find_duplicate_issue() {
+	local title="$1"
+	local search_terms
+	search_terms=$(printf '%s' "$title" | sed 's/^[a-zA-Z0-9_-]*: *//')
+
+	if [[ -z "$search_terms" ]]; then
+		return 1
+	fi
+
+	local existing_issue
+	existing_issue=$(gh issue list --repo "$MAESTRO_SLUG" \
+		--state all --search "\"$search_terms\" in:title is:issue" \
+		--json number --limit 1 -q '.[0].number' 2>/dev/null || echo "")
+
+	if _is_valid_issue_number "$existing_issue"; then
+		echo "$existing_issue"
+		return 0
+	fi
+
+	return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _extract_issue_url ISSUE_OUTPUT
+#
+# Extracts the canonical GitHub issue URL from wrapper output that may include
+# informational log lines before the actual URL.
+# ─────────────────────────────────────────────────────────────────────────────
+_extract_issue_url() {
+	local issue_output="$1"
+	local issue_line=""
+	local line
+
+	while IFS= read -r line; do
+		if [[ "$line" =~ ^https://github\.com/[^[:space:]]+/[^[:space:]]+/issues/[0-9]+$ ]]; then
+			issue_line="$line"
+		fi
+	done <<<"$issue_output"
+
+	if [[ -n "$issue_line" ]]; then
+		printf '%s\n' "$issue_line"
+		return 0
+	fi
+
+	return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _extract_issue_number ISSUE_URL
+#
+# Extracts and validates a numeric issue number from an issue URL.
+# ─────────────────────────────────────────────────────────────────────────────
+_extract_issue_number() {
+	local issue_url="$1"
+	local issue_number
+	issue_number=$(printf '%s' "$issue_url" | grep -oE '[0-9]+$' || true)
+
+	if _is_valid_issue_number "$issue_number"; then
+		printf '%s\n' "$issue_number"
+		return 0
+	fi
+
+	return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _build_issue_body TITLE
+#
+# Auto-generates a standard issue body from TITLE with diagnostics and context.
+# Prints the body to stdout.
+# ─────────────────────────────────────────────────────────────────────────────
+_build_issue_body() {
+	local title="$1"
+	local diagnostics
+	diagnostics=$(gather_diagnostics 2>/dev/null || echo "")
+
+	cat <<EOF
+## Description
+
+${title}
+
+## Environment
+
+${diagnostics}
+
+## Context
+
+This issue was automatically routed to the maestro framework repo by \`framework-issue-helper.sh\` because it contains framework-level indicators (references to ~/.maestro/ files, framework scripts, or supervisor/pulse concepts).
+
+Filed from: $(git rev-parse --show-toplevel 2>/dev/null || echo 'unknown repo')
+EOF
+	return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _append_signature_footer BODY
+#
+# Appends the gh signature footer to BODY if the helper is available.
+# Prints the (possibly augmented) body to stdout.
+# ─────────────────────────────────────────────────────────────────────────────
+_append_signature_footer() {
+	local body="$1"
+	local sig_helper="${SCRIPT_DIR}/gh-signature-helper.sh"
+
+	if [[ -x "$sig_helper" ]]; then
+		local sig_footer
+		sig_footer=$("$sig_helper" footer --body "$body" 2>/dev/null || echo "")
+		if [[ -n "$sig_footer" ]]; then
+			body="${body}${sig_footer}"
+		fi
+	fi
+
+	printf '%s' "$body"
+	return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _emit_issue_result ISSUE_URL
+#
+# Extracts the issue number from ISSUE_URL and prints structured output.
+# ─────────────────────────────────────────────────────────────────────────────
+_emit_issue_result() {
+	local issue_output="$1"
+	local issue_url
+	issue_url=$(_extract_issue_url "$issue_output" || printf '%s' "$issue_output")
+	local issue_num
+	issue_num=$(_extract_issue_number "$issue_url" || true)
+
+	if _is_valid_issue_number "$issue_num"; then
+		log_success "Created framework issue: ${MAESTRO_SLUG}#${issue_num}"
+		log_success "URL: $issue_url"
+		echo "issue_url=${issue_url}"
+		echo "issue_num=${issue_num}"
+		echo "status=created"
+	else
+		log_error "Issue created but could not extract a valid numeric issue number from: $issue_url"
+		return 1
+	fi
+
+	return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _normalise_tier_label TIER
+#
+# Normalises a tier value to the canonical tier:* label shape.
+# ─────────────────────────────────────────────────────────────────────────────
+_normalise_tier_label() {
+	local tier="$1"
+
+	if [[ -z "$tier" ]]; then
+		return 1
+	fi
+
+	if [[ "$tier" == tier:* ]]; then
+		printf '%s\n' "$tier"
+	else
+		printf 'tier:%s\n' "$tier"
+	fi
+
+	return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# log_framework_issue TITLE BODY LABEL DRY_RUN AUTO_DISPATCH TIER
+#
+# Creates an issue on Aditya060806/Maestro. Deduplicates by title.
+# ─────────────────────────────────────────────────────────────────────────────
+log_framework_issue() {
+	local title="$1"
+	local body="$2"
+	local label="${3:-bug}"
+	local dry_run="${4:-false}"
+	local auto_dispatch="${5:-false}"
+	local tier="${6:-}"
+
+	_validate_gh_prereqs "$title" || return 1
+
+	# Deduplication: search for existing issues with similar title
+	local existing_issue
+	existing_issue=$(_find_duplicate_issue "$title" 2>/dev/null || echo "")
+	if _is_valid_issue_number "$existing_issue"; then
+		log_warn "Existing issue found: ${MAESTRO_SLUG}#${existing_issue} — skipping duplicate creation"
+		echo "issue_url=https://github.com/${MAESTRO_SLUG}/issues/${existing_issue}"
+		echo "issue_num=${existing_issue}"
+		echo "status=duplicate"
+		return 0
+	fi
+
+	# Auto-generate body if not provided
+	if [[ -z "$body" ]]; then
+		body=$(_build_issue_body "$title")
+	fi
+
+	body=$(_append_signature_footer "$body")
+
+	local -a issue_labels=("$label")
+	if [[ "$auto_dispatch" == "yes" ]]; then
+		issue_labels+=("auto-dispatch" "status:available")
+	fi
+	if [[ -n "$tier" ]]; then
+		local tier_label
+		tier_label=$(_normalise_tier_label "$tier") || {
+			log_error "Invalid tier: $tier"
+			return 1
+		}
+		issue_labels+=("$tier_label")
+	fi
+
+	if [[ "$dry_run" == "true" ]]; then
+		log_info "DRY RUN — would create issue on ${MAESTRO_SLUG}:"
+		log_info "  Title: $title"
+		log_info "  Labels: ${issue_labels[*]}"
+		log_info "  Body preview: ${body:0:200}..."
+		echo "status=dry_run"
+		return 2
+	fi
+
+	log_info "Creating issue on ${MAESTRO_SLUG}: $title"
+
+	local -a create_args=(
+		--repo "$MAESTRO_SLUG" \
+		--title "$title" \
+		--body "$body"
+	)
+	local create_label
+	for create_label in "${issue_labels[@]}"; do
+		create_args+=(--label "$create_label")
+	done
+
+	local issue_url
+	issue_url=$(gh_create_issue "${create_args[@]}" 2>&1) || {
+		log_error "Failed to create issue: $issue_url"
+		return 1
+	}
+
+	_emit_issue_result "$issue_url"
+	return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _log_option_value FLAG OPTION ARG_COUNT [NEXT_VALUE]
+# ─────────────────────────────────────────────────────────────────────────────
+_log_option_value() {
+	local flag_name="$1"
+	local option="$2"
+	local arg_count="$3"
+	local next_value="${4-}"
+
+	case "$option" in
+	*=*)
+		printf '%s\n' "${option#*=}"
+		return 0
+		;;
+	esac
+
+	if [[ "$arg_count" -lt 2 ]]; then
+		log_error "${flag_name} requires a value"
+		return 1
+	fi
+
+	printf '%s\n' "$next_value"
+	return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _parse_log_command ARGS...
+# ─────────────────────────────────────────────────────────────────────────────
+_parse_log_command() {
+	local title="" body="" label="bug" dry_run="false" auto_dispatch="no" tier=""
+	while [[ $# -gt 0 ]]; do
+		local option="$1"
+		case "$option" in
+		--title | --title=* | --body | --body=* | --label | --label=* | --tier | --tier=*)
+			local flag_name="${option%%=*}"
+			local option_value
+			option_value="$(_log_option_value "$flag_name" "$option" "$#" "${2-}")" || return 1
+			case "$flag_name" in
+			--title)
+				title="$option_value"
+				;;
+			--body)
+				body="$option_value"
+				;;
+			--label)
+				label="$option_value"
+				;;
+			--tier)
+				tier="$option_value"
+				;;
+			esac
+			case "$option" in
+			*=*)
+				shift
+				;;
+			*)
+				shift 2
+				;;
+			esac
+			;;
+		--auto-dispatch)
+			auto_dispatch="yes"
+			shift
+			;;
+		--dry-run)
+			dry_run="true"
+			shift
+			;;
+		*)
+			log_error "Unknown option: $option"
+			return 1
+			;;
+		esac
+	done
+	log_framework_issue "$title" "$body" "$label" "$dry_run" "$auto_dispatch" "$tier"
+	return $?
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# parse_and_run ARGS...
+# ─────────────────────────────────────────────────────────────────────────────
+parse_and_run() {
+	local command="${1:-help}"
+	shift || true
+
+	case "$command" in
+	detect)
+		local text="${1:-}"
+		if [[ -z "$text" ]]; then
+			log_error "Usage: framework-issue-helper.sh detect \"text to check\""
+			return 1
+		fi
+		detect_framework_issue "$text"
+		return $?
+		;;
+
+	log)
+		_parse_log_command "$@"
+		return $?
+		;;
+
+	check-repo)
+		local repo_path="$PWD"
+		while [[ $# -gt 0 ]]; do
+			case "$1" in
+			--repo-path)
+				repo_path="$2"
+				shift 2
+				;;
+			*)
+				log_error "Unknown option: $1"
+				return 1
+				;;
+			esac
+		done
+		if check_is_maestro_repo "$repo_path"; then
+			log_info "Current repo IS the maestro framework repo"
+			echo "is_maestro=true"
+			return 0
+		else
+			log_info "Current repo is NOT the maestro framework repo"
+			echo "is_maestro=false"
+			return 1
+		fi
+		;;
+
+	find-repo)
+		local path
+		path=$(get_maestro_repo_path)
+		if [[ -n "$path" ]]; then
+			echo "$path"
+			return 0
+		else
+			log_warn "Could not find local maestro repo path"
+			return 1
+		fi
+		;;
+
+	help | --help | -h)
+		grep '^#' "$0" | grep -v '#!/usr/bin/env' | sed 's/^# //' | sed 's/^#//'
+		return 0
+		;;
+
+	*)
+		log_error "Unknown command: $command"
+		log_error "Run: framework-issue-helper.sh help"
+		return 1
+		;;
+	esac
+}
+
+parse_and_run "$@"
