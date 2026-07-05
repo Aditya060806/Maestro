@@ -41,7 +41,7 @@ Add brew to your PATH per post-install instructions. Alternatively, use apt — 
 
 ```bash
 # Via npm (recommended)
-npm install -g maestro && maestro update
+npm install -g @aditya060806/maestro && maestro update
 
 # Via Homebrew tap
 brew install Aditya060806/tap/maestro && maestro update
