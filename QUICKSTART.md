@@ -10,13 +10,13 @@ The goal of this page: get you from zero to **watching Maestro do one real, usef
 ## 1. Install (30 seconds)
 
 ```bash
-npm install -g @aditya060806/maestro && maestro update
+npm install -g maestro-devops && maestro update
 ```
 
 No npm? Any of these also work:
 
 ```bash
-bun install -g @aditya060806/maestro && maestro update          # Bun
+bun install -g maestro-devops && maestro update          # Bun
 brew install Aditya060806/tap/maestro && maestro update   # Homebrew
 ```
 

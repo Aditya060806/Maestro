@@ -12,7 +12,7 @@ Maestro is an [OpenCode](https://opencode.ai/) plugin and autonomous AI DevOps f
 ![Maestro planning a task, dispatching a worker, and opening a pull request](docs/assets/demo-terminal.svg)
 
 ```bash
-npm install -g @aditya060806/maestro && maestro update
+npm install -g maestro-devops && maestro update
 ```
 
 Then open [OpenCode](https://opencode.ai/) and type `/onboarding`. New here? Start with the **[2-minute Quickstart »](QUICKSTART.md)**
@@ -115,7 +115,7 @@ pie showData
 
 <!-- Release & Version Info -->
 [![Version](https://img.shields.io/badge/Version-1.0.1-blue.svg)](https://github.com/Aditya060806/Maestro/releases)
-[![npm version](https://img.shields.io/npm/v/@aditya060806/maestro)](https://www.npmjs.com/package/@aditya060806/maestro)
+[![npm version](https://img.shields.io/npm/v/maestro-devops)](https://www.npmjs.com/package/maestro-devops)
 [![Homebrew](https://img.shields.io/badge/homebrew-Aditya060806%2Ftap-orange)](https://github.com/Aditya060806/homebrew-tap)
 [![GitHub repository](https://img.shields.io/badge/github-repository-181717.svg?logo=github)](https://github.com/Aditya060806/Maestro)
 
@@ -153,7 +153,7 @@ the required notices and preferred credit text.
 ## Quick Reference
 
 - **Purpose**: AI-assisted DevOps automation framework
-- **Install**: `npm install -g @aditya060806/maestro && maestro update`
+- **Install**: `npm install -g maestro-devops && maestro update`
 - **Recommended runtime/models**: OpenCode + OpenAI GPT-5.5 / GPT-5.4 mini
 - **Entry**: `maestro` CLI, `~/.maestro/agents/AGENTS.md`
 - **Stack**: Bash scripts, TypeScript (Bun), MCP servers
@@ -281,7 +281,7 @@ Running `maestro security` with no arguments is the single command that covers e
 **npm** (recommended - [verified provenance](https://docs.npmjs.com/generating-provenance-statements)):
 
 ```bash
-npm install -g @aditya060806/maestro && maestro update
+npm install -g maestro-devops && maestro update
 ```
 
 > **Note**: npm suppresses postinstall output. The `&& maestro update` deploys agents to `~/.maestro/agents/`. The CLI will remind you if agents need updating.
@@ -289,7 +289,7 @@ npm install -g @aditya060806/maestro && maestro update
 **Bun** (fast alternative):
 
 ```bash
-bun install -g @aditya060806/maestro && maestro update
+bun install -g maestro-devops && maestro update
 ```
 
 **Homebrew** (macOS/Linux):
@@ -2927,10 +2927,10 @@ See `.agents/tools/credentials/multi-tenant.md` for complete documentation.
 
 ```bash
 # npm (recommended)
-npm install -g @aditya060806/maestro && maestro update
+npm install -g maestro-devops && maestro update
 
 # Bun (fast alternative)
-bun install -g @aditya060806/maestro && maestro update
+bun install -g maestro-devops && maestro update
 
 # Homebrew
 brew install Aditya060806/tap/maestro && maestro update

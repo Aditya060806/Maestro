@@ -1,11 +1,8 @@
 {
-  "name": "@aditya060806/maestro",
+  "name": "maestro-devops",
   "version": "1.0.1",
   "description": "Maestro Framework - AI-assisted development workflows, code quality, and deployment automation",
   "type": "module",
-  "publishConfig": {
-    "access": "public"
-  },
   "workspaces": [
     "packages/gui-shared",
     "packages/gui-api",
