@@ -14,6 +14,19 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('maestro-theme');
+        if (t !== 'light' && t !== 'dark') {
+          t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        }
+        document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
@@ -35,6 +48,10 @@
       <a href="https://github.com/Aditya060806/Maestro" target="_blank" rel="noopener">GitHub</a>
       <a href="https://www.npmjs.com/package/maestro-devops" target="_blank" rel="noopener">npm</a>
     </nav>
+    <button class="theme-toggle" id="themeToggle" aria-label="Toggle colour theme" title="Toggle light / dark">
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+    </button>
     <a class="nav-cta" href="#docs">Get started</a>
     <button class="nav-toggle" id="navToggle" aria-label="Toggle menu" aria-expanded="false"><span></span><span></span><span></span></button>
   </header>
@@ -76,42 +93,42 @@
     </div>
     <div class="feature-grid">
       <article class="card reveal">
-        <div class="card-icon">🛰️</div>
+        <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
         <h3>Pulse supervision</h3>
         <p>Scheduled checks dispatch workers, merge ready PRs, close loops, and surface stuck work — automatically.</p>
       </article>
       <article class="card reveal">
-        <div class="card-icon">🧠</div>
+        <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg></div>
         <h3>Domain agents</h3>
         <p>Code, automation, product, business, marketing, legal, content, research, SEO, health, and reports each get their own guidance.</p>
       </article>
       <article class="card reveal">
-        <div class="card-icon">🔀</div>
+        <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg></div>
         <h3>Cross-model checks</h3>
         <p>Risky operations can be reviewed by a second provider to reduce shared failure modes.</p>
       </article>
       <article class="card reveal">
-        <div class="card-icon">🔐</div>
+        <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
         <h3>Secrets vault</h3>
         <p>Credentials, scans, confirmations, and audit logs are part of the workflow — never pasted into chat.</p>
       </article>
       <article class="card reveal">
-        <div class="card-icon">🧩</div>
+        <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></div>
         <h3>Service coverage</h3>
         <p>Hosting, Git platforms, DNS, security, monitoring, deployment, payments, and comms via repeatable helpers.</p>
       </article>
       <article class="card reveal">
-        <div class="card-icon">🎯</div>
+        <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></svg></div>
         <h3>Mission work</h3>
         <p>Large goals split into milestones with validation, budget tracking, and automatic advancement.</p>
       </article>
       <article class="card reveal">
-        <div class="card-icon">💾</div>
+        <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg></div>
         <h3>Persistent memory</h3>
         <p>SQLite-backed memory recalls past lessons on demand instead of re-deriving them every session.</p>
       </article>
       <article class="card reveal">
-        <div class="card-icon">⚡</div>
+        <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8Z"/></svg></div>
         <h3>Token efficiency</h3>
         <p>Progressive disclosure and model tiering ship more useful work per dollar and per token.</p>
       </article>

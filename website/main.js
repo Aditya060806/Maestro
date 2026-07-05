@@ -4,6 +4,20 @@
 
   var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+  /* ---- Theme toggle (light / dark) ---- */
+  var root = document.documentElement;
+  var themeToggle = document.getElementById("themeToggle");
+  function applyTheme(t) {
+    root.setAttribute("data-theme", t);
+    try { localStorage.setItem("maestro-theme", t); } catch (e) {}
+  }
+  if (themeToggle) {
+    themeToggle.addEventListener("click", function () {
+      var next = root.getAttribute("data-theme") === "light" ? "dark" : "light";
+      applyTheme(next);
+    });
+  }
+
   /* ---- Nav: scrolled state + mobile toggle ---- */
   var nav = document.getElementById("nav");
   var navToggle = document.getElementById("navToggle");
@@ -83,6 +97,12 @@
   var ctx = canvas.getContext("2d");
   var stars = [];
   var w, h, dpr;
+  var starRGB = "180,180,195";
+  function readStarColor() {
+    var v = getComputedStyle(root).getPropertyValue("--star").trim();
+    if (v) starRGB = v;
+  }
+  new MutationObserver(readStarColor).observe(root, { attributes: true, attributeFilter: ["data-theme"] });
 
   function resize() {
     dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -111,7 +131,7 @@
       var alpha = 0.35 + Math.sin(t * 0.001 + s.tw) * 0.3;
       var size = s.z * 1.6 * dpr;
       ctx.beginPath();
-      ctx.fillStyle = "rgba(160, 200, 230, " + (alpha * s.z) + ")";
+      ctx.fillStyle = "rgba(" + starRGB + "," + (alpha * s.z) + ")";
       ctx.arc(s.x, s.y, size, 0, Math.PI * 2);
       ctx.fill();
     }
@@ -119,6 +139,7 @@
   }
 
   window.addEventListener("resize", resize);
+  readStarColor();
   resize();
   requestAnimationFrame(tick);
 })();
