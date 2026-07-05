@@ -2,6 +2,7 @@
 import { useState } from "react";
 import type { GuiAiAppSummary, GuiLocalRepoSetupSummary, GuiOAuthProviderSummary, GuiSetupTargetSummary, GuiStatusData, GuiVaultCollectionSummary, GuiVaultStatusData } from "../../gui-shared/src";
 import { plannedHomes, text } from "./app-model";
+import { DashboardHeadline } from "./DashboardHeadline";
 import { FileExplorerSurface } from "./FileExplorerSurface";
 import { PathActions } from "./PathActions";
 import { VaultPadlock } from "./VaultBadges";
@@ -21,6 +22,7 @@ export function OverviewSurface({ status }: { status: GuiStatusData }) {
         <h2>{text.maestro}</h2>
         <p>{text.repoDescription}</p>
       </div>
+      <DashboardHeadline status={status} />
       <div className="metric-grid">
         {metrics.map((metric) => (
           <article className="metric-card" key={metric.label}>
