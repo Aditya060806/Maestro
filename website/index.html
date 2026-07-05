@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#08090c" />
+  <title>Maestro — AI that does the whole job</title>
+  <meta name="description" content="Maestro is an OpenCode plugin and autonomous AI DevOps framework. One conversation in, shipped work out — it plans, dispatches parallel workers, verifies, ships PRs, and remembers." />
+  <meta property="og:title" content="Maestro — AI that does the whole job" />
+  <meta property="og:description" content="Autonomous AI DevOps framework. Plans, codes, reviews, ships, and remembers — with security, teamwork, token efficiency, and quality control built in." />
+  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2322d3ee' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2 2 7l10 5 10-5-10-5Z'/%3E%3Cpath d='m2 17 10 5 10-5'/%3E%3Cpath d='m2 12 10 5 10-5'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <canvas id="starfield" aria-hidden="true"></canvas>
+  <div class="grid-overlay" aria-hidden="true"></div>
+
+  <!-- Nav -->
+  <header class="nav" id="nav">
+    <a class="brand" href="#top" aria-label="Maestro home">
+      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+      <span class="brand-name">Maestro</span>
+      <span class="brand-badge">v1.0.1</span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#features">Features</a>
+      <a href="#how">How it works</a>
+      <a href="#compare">Compare</a>
+      <a href="#docs">Docs</a>
+      <a href="https://github.com/Aditya060806/Maestro" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://www.npmjs.com/package/maestro-devops" target="_blank" rel="noopener">npm</a>
+    </nav>
+    <a class="nav-cta" href="#docs">Get started</a>
+    <button class="nav-toggle" id="navToggle" aria-label="Toggle menu" aria-expanded="false"><span></span><span></span><span></span></button>
+  </header>
+
+  <!-- Hero -->
+  <section class="hero" id="top">
+    <div class="hero-inner reveal">
+      <span class="eyebrow">OpenCode plugin · Autonomous AI DevOps framework</span>
+      <h1 class="hero-title">MAESTRO</h1>
+      <p class="hero-tagline">AI that does the whole job.</p>
+      <p class="hero-sub">One conversation in, shipped work out. Maestro plans the work, dispatches parallel workers, protects your secrets, manages branches and PRs, watches CI, and learns from what went wrong last time — across code, infrastructure, business, and content.</p>
+      <div class="install-row">
+        <code id="installCmd">npm install -g maestro-devops</code>
+        <button class="copy-btn" id="copyBtn" aria-label="Copy install command">Copy</button>
+      </div>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#docs">Explore the framework</a>
+        <a class="btn btn-ghost" href="https://github.com/Aditya060806/Maestro" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.4-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0C17.3 4.7 18.3 5 18.3 5c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5Z"/></svg>
+          Star on GitHub
+        </a>
+      </div>
+      <div class="hero-stats">
+        <div><strong>12+</strong><span>domain agents</span></div>
+        <div><strong>1,800+</strong><span>helper scripts</span></div>
+        <div><strong>185+</strong><span>slash commands</span></div>
+        <div><strong>30+</strong><span>service integrations</span></div>
+      </div>
+    </div>
+    <a class="scroll-hint" href="#features" aria-label="Scroll to features"><span>Explore</span><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg></a>
+  </section>
+
+  <!-- Features -->
+  <section class="section" id="features">
+    <div class="section-head reveal">
+      <span class="section-eyebrow">Why Maestro</span>
+      <h2>Beyond single-task AI.</h2>
+      <p>A normal AI harness is great for one job and weak at the work around it. Maestro owns the surrounding discipline — context, routing, safety, git hygiene, verification, memory, and follow-through.</p>
+    </div>
+    <div class="feature-grid">
+      <article class="card reveal">
+        <div class="card-icon">🛰️</div>
+        <h3>Pulse supervision</h3>
+        <p>Scheduled checks dispatch workers, merge ready PRs, close loops, and surface stuck work — automatically.</p>
+      </article>
+      <article class="card reveal">
+        <div class="card-icon">🧠</div>
+        <h3>Domain agents</h3>
+        <p>Code, automation, product, business, marketing, legal, content, research, SEO, health, and reports each get their own guidance.</p>
+      </article>
+      <article class="card reveal">
+        <div class="card-icon">🔀</div>
+        <h3>Cross-model checks</h3>
+        <p>Risky operations can be reviewed by a second provider to reduce shared failure modes.</p>
+      </article>
+      <article class="card reveal">
+        <div class="card-icon">🔐</div>
+        <h3>Secrets vault</h3>
+        <p>Credentials, scans, confirmations, and audit logs are part of the workflow — never pasted into chat.</p>
+      </article>
+      <article class="card reveal">
+        <div class="card-icon">🧩</div>
+        <h3>Service coverage</h3>
+        <p>Hosting, Git platforms, DNS, security, monitoring, deployment, payments, and comms via repeatable helpers.</p>
+      </article>
+      <article class="card reveal">
+        <div class="card-icon">🎯</div>
+        <h3>Mission work</h3>
+        <p>Large goals split into milestones with validation, budget tracking, and automatic advancement.</p>
+      </article>
+      <article class="card reveal">
+        <div class="card-icon">💾</div>
+        <h3>Persistent memory</h3>
+        <p>SQLite-backed memory recalls past lessons on demand instead of re-deriving them every session.</p>
+      </article>
+      <article class="card reveal">
+        <div class="card-icon">⚡</div>
+        <h3>Token efficiency</h3>
+        <p>Progressive disclosure and model tiering ship more useful work per dollar and per token.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- How it works -->
+  <section class="section" id="how">
+    <div class="section-head reveal">
+      <span class="section-eyebrow">How it works</span>
+      <h2>One goal in, shipped work out.</h2>
+      <p>Maestro runs a continuous loop. Every pass leaves the system better than it found it.</p>
+    </div>
+    <div class="steps">
+      <div class="step reveal"><span class="step-n">01</span><h3>Plan</h3><p>Break the goal into milestones and worker-ready tasks.</p></div>
+      <div class="step-arrow reveal">→</div>
+      <div class="step reveal"><span class="step-n">02</span><h3>Dispatch</h3><p>Spin up parallel workers in isolated git worktrees.</p></div>
+      <div class="step-arrow reveal">→</div>
+      <div class="step reveal"><span class="step-n">03</span><h3>Verify</h3><p>Tests, lint, CI, and review gates before anything is "done".</p></div>
+      <div class="step-arrow reveal">→</div>
+      <div class="step reveal"><span class="step-n">04</span><h3>Ship</h3><p>Branch, PR, and merge with task IDs and a clean audit trail.</p></div>
+      <div class="step-arrow reveal">→</div>
+      <div class="step reveal"><span class="step-n">05</span><h3>Learn</h3><p>Capture lessons to memory and feed them back into planning.</p></div>
+    </div>
+  </section>
+
+  <!-- Compare -->
+  <section class="section" id="compare">
+    <div class="section-head reveal">
+      <span class="section-eyebrow">Comparison</span>
+      <h2>How Maestro is different.</h2>
+      <p>The same task, handled with real discipline instead of copy-paste.</p>
+    </div>
+    <div class="table-wrap reveal">
+      <table class="compare-table">
+        <thead>
+          <tr><th>Capability</th><th>Plain AI chat</th><th>Single-agent CLI</th><th class="col-hi">Maestro</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Context loading</td><td>Manual copy-paste</td><td>Whole repo in prompt</td><td class="col-hi">On-demand, progressive</td></tr>
+          <tr><td>Model spend</td><td>One model for all</td><td>One model for all</td><td class="col-hi">Tiered: cheap routine, strong judgement</td></tr>
+          <tr><td>Parallel work</td><td>No</td><td>Rare</td><td class="col-hi">Worktrees + parallel workers</td></tr>
+          <tr><td>Secrets handling</td><td>Pasted into chat</td><td>Ad hoc</td><td class="col-hi">Encrypted vault, never in chat</td></tr>
+          <tr><td>Git hygiene</td><td>Manual</td><td>Manual</td><td class="col-hi">Auto worktrees, PRs, task IDs</td></tr>
+          <tr><td>Verification</td><td>You check</td><td>Sometimes</td><td class="col-hi">Tests / lint / CI gates</td></tr>
+          <tr><td>Memory across sessions</td><td>None</td><td>Limited</td><td class="col-hi">SQLite memory, recalled on demand</td></tr>
+          <tr><td>Supervision</td><td>You watch</td><td>You watch</td><td class="col-hi">Pulse loop dispatches &amp; unsticks</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Efficiency -->
+  <section class="section" id="efficiency">
+    <div class="section-head reveal">
+      <span class="section-eyebrow">Efficiency by design</span>
+      <h2>More shipped work per token.</h2>
+      <p>Two levers do most of the work: progressive disclosure loads only the guidance a task needs, and model tiering routes routine work to fast, cheap models while reserving strong models for judgement.</p>
+    </div>
+    <div class="efficiency">
+      <div class="donut-wrap reveal">
+        <div class="donut" style="--pct:70">
+          <div class="donut-center"><strong>70/30</strong><span>budget split</span></div>
+        </div>
+        <ul class="legend">
+          <li><span class="dot dot-accent"></span> Fast / cheap — triage &amp; routine <strong>70%</strong></li>
+          <li><span class="dot dot-strong"></span> Strong — architecture, review, risk <strong>30%</strong></li>
+        </ul>
+      </div>
+      <ul class="eff-list reveal">
+        <li><strong>Progressive disclosure</strong><span>Loads pointers, not full playbooks — smaller prompts.</span></li>
+        <li><strong>Per-agent tool filtering</strong><span>~12–20 tools per agent instead of hundreds.</span></li>
+        <li><strong>Model tiering</strong><span>Cheap models handle the bulk; strong models handle the hard 30%.</span></li>
+        <li><strong>Context offload</strong><span>Working files live on disk, not in the prompt.</span></li>
+        <li><strong>Memory recall</strong><span>Reuses past lessons instead of re-deriving them.</span></li>
+        <li><strong>Token-efficient CLI</strong><span>Compact git / gh / test summaries before they hit context.</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- Docs -->
+  <section class="section" id="docs">
+    <div class="section-head reveal">
+      <span class="section-eyebrow">Documentation</span>
+      <h2>Up and running in two minutes.</h2>
+      <p>You need exactly two things: a terminal and one model provider key. Maestro runs on macOS and Linux (use WSL on Windows).</p>
+    </div>
+    <div class="docs-grid">
+      <div class="doc-step reveal">
+        <span class="doc-n">1</span>
+        <h3>Install</h3>
+        <pre><code>npm install -g maestro-devops
+maestro update</code></pre>
+        <p>Also available via <code>bun</code> and Homebrew. The installed command is <code>maestro</code>.</p>
+      </div>
+      <div class="doc-step reveal">
+        <span class="doc-n">2</span>
+        <h3>Connect one model</h3>
+        <pre><code>maestro model-accounts-pool add openai
+# or: maestro model-accounts-pool add anthropic</code></pre>
+        <p>That's the only hard prerequisite — secrets, GitHub auth, and services set up later, only when needed.</p>
+      </div>
+      <div class="doc-step reveal">
+        <span class="doc-n">3</span>
+        <h3>Your first win</h3>
+        <pre><code># in OpenCode
+/onboarding</code></pre>
+        <p>The wizard ends by running a small real task on your repo — so your first session ships something.</p>
+      </div>
+    </div>
+
+    <div class="cmd-table-wrap reveal">
+      <h3 class="cmd-title">Everyday commands</h3>
+      <table class="cmd-table">
+        <tbody>
+          <tr><td><code>maestro status</code></td><td>Check what's installed</td></tr>
+          <tr><td><code>maestro init</code></td><td>Enable Maestro features in any git repo</td></tr>
+          <tr><td><code>maestro update</code></td><td>Update the framework and deployed agents</td></tr>
+          <tr><td><code>maestro security</code></td><td>Full security assessment (posture, secrets, supply chain)</td></tr>
+          <tr><td><code>maestro secret set NAME</code></td><td>Store a secret safely (encrypted, AI-safe)</td></tr>
+          <tr><td><code>/pulse</code></td><td>Run the autonomous supervisor loop</td></tr>
+          <tr><td><code>/skills recommend "TASK"</code></td><td>Find the right capability for a task</td></tr>
+        </tbody>
+      </table>
+      <div class="docs-links">
+        <a class="btn btn-primary" href="https://www.npmjs.com/package/maestro-devops" target="_blank" rel="noopener">View on npm</a>
+        <a class="btn btn-ghost" href="https://github.com/Aditya060806/Maestro#readme" target="_blank" rel="noopener">Full README</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta reveal">
+    <h2>One conversation → autonomous project delivery.</h2>
+    <p>Security, teamwork, token efficiency, and quality control — built in.</p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="https://www.npmjs.com/package/maestro-devops" target="_blank" rel="noopener">Install maestro-devops</a>
+      <a class="btn btn-ghost" href="https://github.com/Aditya060806/Maestro" target="_blank" rel="noopener">Read the source</a>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="footer-top">
+      <div class="footer-brand">
+        <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+          <span class="brand-name">Maestro</span>
+        </div>
+        <p>Autonomous AI DevOps framework. MIT licensed.</p>
+      </div>
+      <div class="footer-cols">
+        <div class="footer-col">
+          <h4>Project</h4>
+          <a href="https://github.com/Aditya060806/Maestro" target="_blank" rel="noopener">GitHub repository</a>
+          <a href="https://www.npmjs.com/package/maestro-devops" target="_blank" rel="noopener">npm · maestro-devops</a>
+          <a href="https://github.com/Aditya060806/Maestro/issues" target="_blank" rel="noopener">Issues</a>
+          <a href="https://github.com/Aditya060806/Maestro/discussions" target="_blank" rel="noopener">Discussions</a>
+        </div>
+        <div class="footer-col">
+          <h4>Built by</h4>
+          <a href="https://github.com/Aditya060806" target="_blank" rel="noopener">Aditya Pandey · GitHub</a>
+          <a href="https://www.linkedin.com/in/aditya-pandey-p1002/" target="_blank" rel="noopener">Aditya Pandey · LinkedIn</a>
+        </div>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>© 2026 Aditya Pandey &amp; Harvest · MIT License</span>
+      <span>Built with care by <a href="https://www.linkedin.com/in/aditya-pandey-p1002/" target="_blank" rel="noopener">Aditya Pandey</a></span>
+    </div>
+  </footer>
+
+  <script src="./main.js" defer></script>
+</body>
+</html>
