@@ -14,20 +14,19 @@ A zero-dependency static site (HTML + CSS + vanilla JS) for [Maestro](https://gi
 
 ## Deploy to Vercel
 
-There are two supported ways — either works.
-
-### Option A — Root Directory = `website` (recommended)
+This is a static site in a subdirectory. Deploy it by pointing Vercel's **Root
+Directory** at `website` — that is the only setting required.
 
 1. Import the GitHub repo `Aditya060806/Maestro` into Vercel.
-2. In **Project Settings → General → Root Directory**, set it to `website`.
-3. Framework Preset: **Other**. Build Command: none. Output Directory: leave default.
-4. Deploy. Vercel serves the static files directly.
+2. **Root Directory:** set it to `website` (click **Edit** next to Root Directory).
+3. **Framework Preset:** `Other`.
+4. **Build & Output Settings:** leave everything blank — no Build Command, no
+   Output Directory, no Install Command. There is no build step.
+5. **Deploy.** Vercel serves the files in `website/` directly.
 
-### Option B — Deploy from the repo root
-
-The repo root `vercel.json` is preconfigured with `outputDirectory: "website"` and a
-no-op build, so importing the repo with the **default** root also serves this site
-without building the monorepo.
+> Do not add an `outputDirectory` at the repo root — with Root Directory set to
+> `website`, that would make Vercel look for `website/website` and fail. The only
+> config is `website/vercel.json` (clean URLs).
 
 ## Local preview
 
